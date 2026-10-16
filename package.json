@@ -17,6 +17,7 @@
     "test:backfill": "tsx scripts/terminal/test-backfill.ts",
     "test:dailyclose-history": "tsx scripts/terminal/test-dailyclose-history.ts",
     "test:dailyclose": "tsx scripts/terminal/test-dailyclose.ts",
+    "test:dailyclose-correction": "tsx scripts/terminal/test-dailyclose-correction.ts",
     "test:quality:db": "tsx scripts/terminal/test-quality-db.ts"
   },
   "dependencies": {

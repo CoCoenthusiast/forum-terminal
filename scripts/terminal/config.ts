@@ -30,6 +30,8 @@ export const RETRY_DELAY_BASE_MS = 2000;
 export const ERROR_MESSAGE_MAX_LENGTH = 300;
 export const CALC_METHOD = 'last_in_60m_window_v1';
 export const CALC_VERSION = 1;
+export const HISTORY_CALC_METHOD = 'daily_close_from_history_v1';
+export const HISTORY_CALC_VERSION = 1;
 export const DAILY_CLOSE_WINDOW_MINUTES = 60;
 export const DAILY_CLOSE_LOOKBACK_DAYS = 7;
 

@@ -4,6 +4,7 @@ import { Decimal } from './prisma-types';
 import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
 import { fetchCoinGeckoHistory, filterAndValidatePricePoints } from './sources/coingecko-history';
 import { fetchDefiLlamaTvl, filterAndValidateTvlPoints, fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, fetchDefiLlamaDexVolume, filterAndValidateDexVolumePoints } from './sources/defillama-history';
+import { upgradeDailyCloses } from './persist';
 
 async function logEndpoint(
   prisma: PrismaClient,
@@ -160,7 +161,37 @@ async function runMetricBackfill(
   return { name: operation, received, ignored, invalid, inserted, firstDate, lastDate, ignoredReasons };
 }
 
+async function runUpgradeCloses(): Promise<void> {
+  const lookbackArg = process.argv.find((a) => a.startsWith('--lookback='));
+  let lookback = 30;
+  if (lookbackArg !== undefined) {
+    const raw = lookbackArg.slice('--lookback='.length);
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      console.error(`[ABORT] --lookback inválido: "${lookbackArg}"`);
+      process.exit(1);
+    }
+    lookback = parsed;
+  }
+
+  checkEnvironment();
+
+  const { prisma } = await import('./db');
+
+  try {
+    const result = await upgradeDailyCloses(prisma, new Date(), lookback);
+    console.log(`[UPGRADE] lookback=${lookback}, corrigidos=${result.corrected}, já atuais=${result.alreadyCurrent}, sem candidato=${result.noCandidate}, bloqueados=${result.blocked}`);
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 async function main() {
+  if (process.argv.includes('--upgrade-closes')) {
+    await runUpgradeCloses();
+    return;
+  }
+
   const isDryRun = process.argv.includes('--dry-run');
 
   const daysArgIndex = process.argv.findIndex((a) => a === '--days' || a.startsWith('--days='));
