@@ -150,6 +150,7 @@ export const QUALITY_LOG_OPERATION_MAP: QualityLogOperationMapEntry[] = [
 ] as const;
 
 export const BACKFILL_CG_DAYS = 365;
+export const DAILY_CLOSE_BACKFILL_CG_DAYS = 3;
 export const BACKFILL_CG_INTERVAL = 'daily';
 export const BACKFILL_CG_ASSETS = ['solana', 'bitcoin', 'ethereum'] as const;
 export const BACKFILL_CG_PAUSE_MS = 3000;

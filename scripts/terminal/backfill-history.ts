@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import type { PrismaClient } from './generated/db/client';
 import { Decimal } from './prisma-types';
-import { checkEnvironment, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
+import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
 import { fetchCoinGeckoHistory, filterAndValidatePricePoints } from './sources/coingecko-history';
 import { fetchDefiLlamaTvl, filterAndValidateTvlPoints, fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, fetchDefiLlamaDexVolume, filterAndValidateDexVolumePoints } from './sources/defillama-history';
 
@@ -52,18 +52,18 @@ async function upsertDataSource(prisma: PrismaClient, provider: string, displayN
   return ds.id;
 }
 
-async function runPriceBackfill(prisma: PrismaClient, cgSourceId: string, asset: string, todayStartMs: number): Promise<BackfillSeriesResult> {
+async function runPriceBackfill(prisma: PrismaClient, cgSourceId: string, asset: string, todayStartMs: number, days: number = BACKFILL_CG_DAYS, includeTodayMidnight: boolean = false): Promise<BackfillSeriesResult> {
   const operation = `backfill_price_${asset}`;
-  const endpoint = `/coins/${asset}/market_chart?vs_currency=usd&days=365&interval=daily`;
+  const endpoint = `/coins/${asset}/market_chart?vs_currency=usd&days=${days}&interval=daily`;
   let received = 0, ignored = 0, invalid = 0, inserted = 0;
   let firstDate: string | null = null, lastDate: string | null = null;
   const ignoredReasons: Record<string, number> = {};
   let result: { ok: boolean; error?: string; records: number } = { ok: false, error: '', records: 0 };
 
-  const data = await fetchCoinGeckoHistory(asset);
+  const data = await fetchCoinGeckoHistory(asset, days);
   received = data.prices.length;
 
-  const filtered = filterAndValidatePricePoints(data.prices, data.market_caps, data.total_volumes, asset, todayStartMs);
+  const filtered = filterAndValidatePricePoints(data.prices, data.market_caps, data.total_volumes, asset, todayStartMs, includeTodayMidnight);
   ignored = filtered.ignored;
   invalid = filtered.invalid;
   Object.entries(filtered.ignoredReasons).forEach(([k, v]) => { ignoredReasons[k] = (ignoredReasons[k] || 0) + v; });
@@ -162,17 +162,41 @@ async function runMetricBackfill(
 
 async function main() {
   const isDryRun = process.argv.includes('--dry-run');
+
+  const daysArgIndex = process.argv.findIndex((a) => a === '--days' || a.startsWith('--days='));
+  let daysOverride: number | null = null;
+  if (daysArgIndex !== -1) {
+    const arg = process.argv[daysArgIndex];
+    const raw = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : '';
+    const parsed = raw === '' ? DAILY_CLOSE_BACKFILL_CG_DAYS : Number(raw);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      console.error(`[ABORT] --days inválido: "${arg}"`);
+      process.exit(1);
+    }
+    daysOverride = parsed;
+  }
+
+  const onlyArg = process.argv.find((a) => a.startsWith('--only='));
+  const onlyCoingecko = onlyArg === '--only=coingecko';
+  if (onlyArg !== undefined && !onlyCoingecko) {
+    console.error(`[ABORT] valor de --only não suportado: "${onlyArg}"`);
+    process.exit(1);
+  }
+
+  const effectiveDays = daysOverride ?? BACKFILL_CG_DAYS;
+  const includeTodayMidnight = daysOverride !== null;
+
   const now = new Date();
   const todayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 
   if (isDryRun) {
     console.log('[DRY-RUN] Modo simulação - sem escrita no banco');
     try {
-      console.log('Buscando dados CoinGecko...');
+      console.log(`Buscando dados CoinGecko (dias=${effectiveDays}, includeTodayMidnight=${includeTodayMidnight})...`);
       for (const asset of BACKFILL_CG_ASSETS) {
-        const data = await fetchCoinGeckoHistory(asset);
+        const data = await fetchCoinGeckoHistory(asset, effectiveDays);
         console.log(`${asset}: ${data.prices.length} pontos brutos`);
-        const filtered = filterAndValidatePricePoints(data.prices, data.market_caps, data.total_volumes, asset, todayStartMs);
+        const filtered = filterAndValidatePricePoints(data.prices, data.market_caps, data.total_volumes, asset, todayStartMs, includeTodayMidnight);
         console.log(`  válidos: ${filtered.valid.length}, ignorados: ${filtered.ignored} (${JSON.stringify(filtered.ignoredReasons)}), inválidos: ${filtered.invalid}`);
         if (filtered.valid.length > 0) {
           console.log(`  primeira data: ${filtered.valid[0].collectedAt.toISOString().slice(0, 10)}, última: ${filtered.valid[filtered.valid.length - 1].collectedAt.toISOString().slice(0, 10)}`);
@@ -182,21 +206,23 @@ async function main() {
         }
       }
 
-      console.log('Buscando dados DefiLlama...');
-      const tvlData = await fetchDefiLlamaTvl();
-      console.log(`tvl_usd: ${tvlData.length} pontos brutos`);
-      const tvlFiltered = filterAndValidateTvlPoints(tvlData, todayStartMs);
-      console.log(`  válidos: ${tvlFiltered.valid.length}, ignorados: ${tvlFiltered.ignored} (${JSON.stringify(tvlFiltered.ignoredReasons)}), inválidos: ${tvlFiltered.invalid}`);
+      if (!onlyCoingecko) {
+        console.log('Buscando dados DefiLlama...');
+        const tvlData = await fetchDefiLlamaTvl();
+        console.log(`tvl_usd: ${tvlData.length} pontos brutos`);
+        const tvlFiltered = filterAndValidateTvlPoints(tvlData, todayStartMs);
+        console.log(`  válidos: ${tvlFiltered.valid.length}, ignorados: ${tvlFiltered.ignored} (${JSON.stringify(tvlFiltered.ignoredReasons)}), inválidos: ${tvlFiltered.invalid}`);
 
-      const stableData = await fetchDefiLlamaStablecoins();
-      console.log(`stablecoin_supply_usd: ${stableData.length} pontos brutos`);
-      const stableFiltered = filterAndValidateStablecoinPoints(stableData, todayStartMs);
-      console.log(`  válidos: ${stableFiltered.valid.length}, ignorados: ${stableFiltered.ignored} (${JSON.stringify(stableFiltered.ignoredReasons)}), inválidos: ${stableFiltered.invalid}`);
+        const stableData = await fetchDefiLlamaStablecoins();
+        console.log(`stablecoin_supply_usd: ${stableData.length} pontos brutos`);
+        const stableFiltered = filterAndValidateStablecoinPoints(stableData, todayStartMs);
+        console.log(`  válidos: ${stableFiltered.valid.length}, ignorados: ${stableFiltered.ignored} (${JSON.stringify(stableFiltered.ignoredReasons)}), inválidos: ${stableFiltered.invalid}`);
 
-      const dexData = await fetchDefiLlamaDexVolume();
-      console.log(`dex_volume_daily_usd: ${dexData.length} pontos brutos`);
-      const dexFiltered = filterAndValidateDexVolumePoints(dexData, todayStartMs);
-      console.log(`  válidos: ${dexFiltered.valid.length}, ignorados: ${dexFiltered.ignored} (${JSON.stringify(dexFiltered.ignoredReasons)}), inválidos: ${dexFiltered.invalid}`);
+        const dexData = await fetchDefiLlamaDexVolume();
+        console.log(`dex_volume_daily_usd: ${dexData.length} pontos brutos`);
+        const dexFiltered = filterAndValidateDexVolumePoints(dexData, todayStartMs);
+        console.log(`  válidos: ${dexFiltered.valid.length}, ignorados: ${dexFiltered.ignored} (${JSON.stringify(dexFiltered.ignoredReasons)}), inválidos: ${dexFiltered.invalid}`);
+      }
 
       console.log('[DRY-RUN] OK - simulação concluída sem escrita no banco');
     } catch (e) {
@@ -215,12 +241,12 @@ async function main() {
 
   try {
     const cgSourceId = await upsertDataSource(prisma, 'coingecko_history', 'CoinGecko (histórico)', 'https://api.coingecko.com/api/v3');
-    const llamaSourceId = await upsertDataSource(prisma, 'defillama_history', 'DefiLlama (histórico)', 'https://api.llama.fi');
+    const llamaSourceId = onlyCoingecko ? null : await upsertDataSource(prisma, 'defillama_history', 'DefiLlama (histórico)', 'https://api.llama.fi');
 
     for (const asset of BACKFILL_CG_ASSETS) {
       try {
-        console.log(`Executando backfill de preço para ${asset}...`);
-        const res = await runPriceBackfill(prisma, cgSourceId, asset, todayStartMs);
+        console.log(`Executando backfill de preço para ${asset} (dias=${effectiveDays})...`);
+        const res = await runPriceBackfill(prisma, cgSourceId, asset, todayStartMs, effectiveDays, includeTodayMidnight);
         results.push(res);
         if (res.inserted > 0 || res.ignored > 0 || res.invalid > 0) allFailed = false;
         console.log(`  ${res.name}: recebidos=${res.received}, ignorados=${res.ignored}, inválidos=${res.invalid}, inseridos=${res.inserted}, primeiro=${res.firstDate}, último=${res.lastDate}`);
@@ -232,34 +258,36 @@ async function main() {
       }
     }
 
-    try {
-      console.log('Executando backfill de TVL...');
-      const tvlRes = await runMetricBackfill(prisma, llamaSourceId, 'tvl_usd', fetchDefiLlamaTvl, filterAndValidateTvlPoints, todayStartMs);
-      results.push(tvlRes);
-      if (tvlRes.inserted > 0 || tvlRes.ignored > 0 || tvlRes.invalid > 0) allFailed = false;
-      console.log(`  ${tvlRes.name}: recebidos=${tvlRes.received}, ignorados=${tvlRes.ignored}, inválidos=${tvlRes.invalid}, inseridos=${tvlRes.inserted}, primeiro=${tvlRes.firstDate}, último=${tvlRes.lastDate}`);
-    } catch (e) {
-      console.error('  tvl_usd falhou:', e instanceof Error ? e.message : String(e).slice(0, 300));
-    }
+    if (llamaSourceId) {
+      try {
+        console.log('Executando backfill de TVL...');
+        const tvlRes = await runMetricBackfill(prisma, llamaSourceId, 'tvl_usd', fetchDefiLlamaTvl, filterAndValidateTvlPoints, todayStartMs);
+        results.push(tvlRes);
+        if (tvlRes.inserted > 0 || tvlRes.ignored > 0 || tvlRes.invalid > 0) allFailed = false;
+        console.log(`  ${tvlRes.name}: recebidos=${tvlRes.received}, ignorados=${tvlRes.ignored}, inválidos=${tvlRes.invalid}, inseridos=${tvlRes.inserted}, primeiro=${tvlRes.firstDate}, último=${tvlRes.lastDate}`);
+      } catch (e) {
+        console.error('  tvl_usd falhou:', e instanceof Error ? e.message : String(e).slice(0, 300));
+      }
 
-    try {
-      console.log('Executando backfill de Stablecoin Supply...');
-      const stableRes = await runMetricBackfill(prisma, llamaSourceId, 'stablecoin_supply_usd', fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, todayStartMs);
-      results.push(stableRes);
-      if (stableRes.inserted > 0 || stableRes.ignored > 0 || stableRes.invalid > 0) allFailed = false;
-      console.log(`  ${stableRes.name}: recebidos=${stableRes.received}, ignorados=${stableRes.ignored}, inválidos=${stableRes.invalid}, inseridos=${stableRes.inserted}, primeiro=${stableRes.firstDate}, último=${stableRes.lastDate}`);
-    } catch (e) {
-      console.error('  stablecoin_supply_usd falhou:', e instanceof Error ? e.message : String(e).slice(0, 300));
-    }
+      try {
+        console.log('Executando backfill de Stablecoin Supply...');
+        const stableRes = await runMetricBackfill(prisma, llamaSourceId, 'stablecoin_supply_usd', fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, todayStartMs);
+        results.push(stableRes);
+        if (stableRes.inserted > 0 || stableRes.ignored > 0 || stableRes.invalid > 0) allFailed = false;
+        console.log(`  ${stableRes.name}: recebidos=${stableRes.received}, ignorados=${stableRes.ignored}, inválidos=${stableRes.invalid}, inseridos=${stableRes.inserted}, primeiro=${stableRes.firstDate}, último=${stableRes.lastDate}`);
+      } catch (e) {
+        console.error('  stablecoin_supply_usd falhou:', e instanceof Error ? e.message : String(e).slice(0, 300));
+      }
 
-    try {
-      console.log('Executando backfill de DEX Volume...');
-      const dexRes = await runMetricBackfill(prisma, llamaSourceId, 'dex_volume_daily_usd', fetchDefiLlamaDexVolume, filterAndValidateDexVolumePoints, todayStartMs);
-      results.push(dexRes);
-      if (dexRes.inserted > 0 || dexRes.ignored > 0 || dexRes.invalid > 0) allFailed = false;
-      console.log(`  ${dexRes.name}: recebidos=${dexRes.received}, ignorados=${dexRes.ignored}, inválidos=${dexRes.invalid}, inseridos=${dexRes.inserted}, primeiro=${dexRes.firstDate}, último=${dexRes.lastDate}`);
-    } catch (e) {
-      console.error('  dex_volume_daily_usd falhou:', e instanceof Error ? e.message : String(e).slice(0, 300));
+      try {
+        console.log('Executando backfill de DEX Volume...');
+        const dexRes = await runMetricBackfill(prisma, llamaSourceId, 'dex_volume_daily_usd', fetchDefiLlamaDexVolume, filterAndValidateDexVolumePoints, todayStartMs);
+        results.push(dexRes);
+        if (dexRes.inserted > 0 || dexRes.ignored > 0 || dexRes.invalid > 0) allFailed = false;
+        console.log(`  ${dexRes.name}: recebidos=${dexRes.received}, ignorados=${dexRes.ignored}, inválidos=${dexRes.invalid}, inseridos=${dexRes.inserted}, primeiro=${dexRes.firstDate}, último=${dexRes.lastDate}`);
+      } catch (e) {
+        console.error('  dex_volume_daily_usd falhou:', e instanceof Error ? e.message : String(e).slice(0, 300));
+      }
     }
 
     console.log('\n=== RESUMO DO BACKFILL ===');

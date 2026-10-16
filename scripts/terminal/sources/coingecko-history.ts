@@ -44,12 +44,17 @@ function isClosedDay(tsMs: number, todayStartMs: number): boolean {
   return tsMs < todayStartMs;
 }
 
+function isClosedDayForDailyClose(tsMs: number, todayStartMs: number): boolean {
+  return tsMs <= todayStartMs;
+}
+
 export function filterAndValidatePricePoints(
   rawPoints: [number, number][],
   rawMarketCaps: [number, number][],
   rawVolumes: [number, number][],
   asset: string,
-  todayStartMs: number
+  todayStartMs: number,
+  includeTodayMidnight: boolean = false
 ): { valid: BackfillPricePoint[]; ignored: number; invalid: number; ignoredReasons: Record<string, number> } {
   const valid: BackfillPricePoint[] = [];
   let ignored = 0;
@@ -70,7 +75,10 @@ export function filterAndValidatePricePoints(
       addIgnored('not_midnight_utc');
       continue;
     }
-    if (!isClosedDay(tsMs, todayStartMs)) {
+    const closed = includeTodayMidnight
+      ? isClosedDayForDailyClose(tsMs, todayStartMs)
+      : isClosedDay(tsMs, todayStartMs);
+    if (!closed) {
       addIgnored('not_closed_day');
       continue;
     }
@@ -90,12 +98,12 @@ export function filterAndValidatePricePoints(
   return { valid, ignored, invalid, ignoredReasons };
 }
 
-export async function fetchCoinGeckoHistory(asset: string): Promise<{ prices: [number, number][]; market_caps: [number, number][]; total_volumes: [number, number][] }> {
+export async function fetchCoinGeckoHistory(asset: string, days: number = BACKFILL_CG_DAYS): Promise<{ prices: [number, number][]; market_caps: [number, number][]; total_volumes: [number, number][] }> {
   const demoKey = process.env.COINGECKO_DEMO_API_KEY;
   const headers: Record<string, string> = { 'Accept': 'application/json' };
   if (demoKey) headers['x-cg-demo-api-key'] = demoKey;
 
-  const url = `${BACKFILL_CG_BASE_URL}/coins/${asset}/market_chart?vs_currency=usd&days=${BACKFILL_CG_DAYS}&interval=${BACKFILL_CG_INTERVAL}`;
+  const url = `${BACKFILL_CG_BASE_URL}/coins/${asset}/market_chart?vs_currency=usd&days=${days}&interval=${BACKFILL_CG_INTERVAL}`;
   const data = await fetchWithRetry(url, headers);
   if (!data || !Array.isArray(data.prices) || !Array.isArray(data.market_caps) || !Array.isArray(data.total_volumes)) {
     throw new Error(`Resposta inesperada para ${asset}: estrutura inválida`);
