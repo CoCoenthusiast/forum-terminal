@@ -77,7 +77,29 @@ model DailyClose {
 
   createdAt         DateTime @default(now())
 
+  corrections       DailyCloseCorrection[]
+
   @@unique([asset, date])
+}
+
+model DailyCloseCorrection {
+  id             String   @id @default(cuid())
+  asset          String
+  date           DateTime     @db.Date
+
+  oldCloseUsd    Decimal     @db.Decimal(38, 18)
+  newCloseUsd    Decimal     @db.Decimal(38, 18)
+  oldCalcMethod  String
+  newCalcMethod  String
+  reason         String
+
+  dailyCloseId   String?
+  dailyClose     DailyClose? @relation(fields: [dailyCloseId], references: [id], onDelete: SetNull)
+
+  createdAt      DateTime @default(now())
+
+  @@index([asset, date])
+  @@index([dailyCloseId])
 }
 
 model CollectionLog {
