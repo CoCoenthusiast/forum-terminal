@@ -1,0 +1,118 @@
+generator client {
+  provider   = "prisma-client"
+  output     = "../scripts/terminal/generated/db"
+  engineType = "client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("TERMINAL_DATABASE_URL")
+}
+
+model DataSource {
+  id          String   @id @default(cuid())
+  provider    String   @unique
+  displayName String
+  baseUrl     String
+  version     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  snapshots       MarketSnapshot[]
+  metricSnapshots MetricSnapshot[]
+  collectionLogs  CollectionLog[]
+}
+
+model MarketSnapshot {
+  id            String   @id @default(cuid())
+  sourceId      String
+  asset         String
+
+  priceUsd      Decimal     @db.Decimal(38, 18)
+  change24hPct  Decimal?    @db.Decimal(18, 8)
+  volume24hUsd  Decimal?    @db.Decimal(38, 2)
+  marketCapUsd  Decimal?    @db.Decimal(38, 2)
+
+  sourceTs      DateTime
+  collectedAt   DateTime
+
+  dailyClose    DailyClose?   @relation("SnapshotToDailyClose")
+  source        DataSource    @relation(fields: [sourceId], references: [id])
+
+  @@unique([sourceId, asset, collectedAt])
+  @@index([asset, collectedAt])
+  @@index([asset, sourceTs])
+}
+
+model MetricSnapshot {
+  id            String   @id @default(cuid())
+  sourceId      String
+  scope         String
+  metric        String
+
+  value         Decimal     @db.Decimal(38, 8)
+  unit          String
+
+  bucketTs      DateTime?
+  collectedAt   DateTime
+  sourceTs      DateTime?
+
+  source        DataSource    @relation(fields: [sourceId], references: [id])
+
+  @@unique([sourceId, scope, metric, collectedAt])
+  @@index([scope, metric, bucketTs])
+  @@index([scope, metric, collectedAt])
+}
+
+model DailyClose {
+  id                String   @id @default(cuid())
+  asset             String
+  date              DateTime     @db.Date
+  closeUsd          Decimal     @db.Decimal(38, 18)
+
+  sourceSnapshotId  String   @unique
+  sourceSnapshot    MarketSnapshot @relation("SnapshotToDailyClose", fields: [sourceSnapshotId], references: [id], onDelete: Restrict)
+  calcMethod        String
+  calcVersion       Int       @default(1)
+
+  createdAt         DateTime @default(now())
+
+  @@unique([asset, date])
+}
+
+model CollectionLog {
+  id            String   @id @default(cuid())
+  sourceId      String
+  operation     String
+  endpoint      String
+  status        String
+  httpStatus    Int?
+  latencyMs     Int
+  errorMessage  String?
+  recordsFetched Int?
+  collectedAt   DateTime @default(now())
+
+  source        DataSource @relation(fields: [sourceId], references: [id])
+
+  @@index([sourceId, collectedAt])
+  @@index([status])
+}
+
+model IndicatorSnapshot {
+  id          String     @id @default(cuid())
+  indicator   String
+  scope       String
+  asOf        DateTime   @db.Date
+  status      String
+  value       Decimal?   @db.Decimal(30, 12)
+  unit        String
+  inputCount  Int
+  fromDate    DateTime?  @db.Date
+  toDate      DateTime?  @db.Date
+  reason      String?
+  formulaVersion String
+  computedAt  DateTime @default(now())
+
+  @@unique([indicator, scope, asOf, formulaVersion])
+  @@index([scope, indicator, asOf])
+}

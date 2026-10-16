@@ -1,0 +1,31 @@
+{
+  "name": "forum-terminal",
+  "version": "0.1.0",
+  "description": "SOL terminal data collectors and indicator tests",
+  "scripts": {
+    "generate": "prisma generate --schema prisma-terminal/schema.prisma",
+    "typecheck": "tsc --noEmit",
+    "collect:coingecko": "tsx scripts/terminal/collect-coingecko.ts",
+    "collect:defillama": "tsx scripts/terminal/collect-defillama.ts",
+    "backfill": "tsx scripts/terminal/backfill-history.ts",
+    "report:quality": "tsx scripts/terminal/report-quality.ts",
+    "test": "npm run test:series && npm run test:formulas && npm run test:loaders && npm run test:quality && npm run test:backfill",
+    "test:series": "tsx scripts/terminal/indicators/test-series.ts",
+    "test:formulas": "tsx scripts/terminal/indicators/test-formulas.ts",
+    "test:loaders": "tsx scripts/terminal/indicators/test-loaders.ts",
+    "test:quality": "tsx scripts/terminal/test-quality.ts",
+    "test:backfill": "tsx scripts/terminal/test-backfill.ts",
+    "test:dailyclose": "tsx scripts/terminal/test-dailyclose.ts",
+    "test:quality:db": "tsx scripts/terminal/test-quality-db.ts"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.9.1",
+    "@prisma/client": "^6.19.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "prisma": "^6.19.3",
+    "tsx": "^4.23.15",
+    "typescript": "^5"
+  }
+}
