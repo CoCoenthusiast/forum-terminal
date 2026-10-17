@@ -1,0 +1,40 @@
+name: Daily Close
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: daily-close
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  daily-close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+        env:
+          DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+          DIRECT_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+      - name: Generate terminal Prisma client
+        run: npx prisma generate --schema prisma-terminal/schema.prisma
+        env:
+          DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+          DIRECT_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+          TERMINAL_DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+      - run: npx tsx scripts/terminal/backfill-history.ts --days=3 --only=coingecko
+        env:
+          TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
+          COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
+      - run: npx tsx scripts/terminal/backfill-history.ts --upgrade-closes
+        env:
+          TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
+          COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
