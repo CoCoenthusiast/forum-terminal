@@ -18,6 +18,9 @@
     "test:dailyclose-history": "tsx scripts/terminal/test-dailyclose-history.ts",
     "test:dailyclose": "tsx scripts/terminal/test-dailyclose.ts",
     "test:dailyclose-correction": "tsx scripts/terminal/test-dailyclose-correction.ts",
+    "compute:indicators": "tsx scripts/terminal/compute-indicators.ts",
+    "test:indicators": "tsx scripts/terminal/test-indicators-catalog.ts",
+    "test:indicators:db": "tsx scripts/terminal/test-indicators-db.ts",
     "test:quality:db": "tsx scripts/terminal/test-quality-db.ts"
   },
   "dependencies": {
