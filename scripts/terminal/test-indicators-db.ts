@@ -10,6 +10,7 @@ import {
   buildLoadRange,
   type IndicatorRow,
 } from './indicators/catalog';
+import { selectRowsToWrite, INSUFFICIENT_HISTORY_WAIT_DAYS } from './compute-indicators';
 
 const url = process.env.TEST_DATABASE_URL;
 if (!url || !/(localhost|127\.0\.0\.1):5433/.test(url)) {
@@ -25,6 +26,7 @@ const prisma = new PrismaClient({ adapter });
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TEST_DAYS = 10;
 const ASSET_ROWS = 20;
+const WAIT_FV = 'v1-wait-test';
 
 let failures = 0;
 let passed = 0;
@@ -67,6 +69,7 @@ async function main(): Promise<void> {
   try {
     // limpa resíduos de execuções anteriores do teste
     await prisma.indicatorSnapshot.deleteMany({ where: { asOf: { gte: asOfs[asOfs.length - 1].date, lte: asOfs[0].date }, formulaVersion: 'v1' } });
+    await prisma.indicatorSnapshot.deleteMany({ where: { formulaVersion: WAIT_FV } });
 
     const marketRows: { sourceId: string; asset: string; priceUsd: number; volume24hUsd: number | null; sourceTs: Date; collectedAt: Date }[] = [];
     for (let k = 1; k <= ASSET_ROWS; k++) {
@@ -114,8 +117,44 @@ async function main(): Promise<void> {
       where: { asOf: { gte: asOfs[asOfs.length - 1].date, lte: asOfs[0].date }, formulaVersion: 'v1' },
     });
     check('total persistido continua igual', total === rows.length, `total=${total}`);
+
+    // --- Período de espera: linhas insufficient_history recentes não são gravadas ---
+    const waitRows = rows.map((r) => ({ ...r, formulaVersion: WAIT_FV }));
+    const waitSelection = selectRowsToWrite(waitRows, todayStart);
+    const waitCutoff = new Date(todayStart - INSUFFICIENT_HISTORY_WAIT_DAYS * DAY_MS);
+
+    check('(a/d) seleção retém insuficientes recentes e mantém atr',
+      waitSelection.heldByWait.length > 0 &&
+      waitSelection.heldByWait.every((r) => r.status === 'insufficient_history' && r.asOf.getTime() >= waitCutoff.getTime()) &&
+      waitSelection.toWrite.some((r) => r.indicator === 'atr'),
+      `held=${waitSelection.heldByWait.length} toWrite=${waitSelection.toWrite.length}`);
+
+    const waitFirst = await prisma.indicatorSnapshot.createMany({ data: waitSelection.toWrite, skipDuplicates: true });
+    check('execução com espera insere só as linhas liberadas', waitFirst.count === waitSelection.toWrite.length, `inserted=${waitFirst.count} expected=${waitSelection.toWrite.length}`);
+
+    const recentInsufficient = await prisma.indicatorSnapshot.count({
+      where: { formulaVersion: WAIT_FV, status: 'insufficient_history', asOf: { gte: waitCutoff } },
+    });
+    check('(a) insuficiente dentro dos últimos 3 dias não foi gravada', recentInsufficient === 0, `count=${recentInsufficient}`);
+
+    const oldInsufficient = await prisma.indicatorSnapshot.count({
+      where: { formulaVersion: WAIT_FV, status: 'insufficient_history', asOf: { lt: waitCutoff } },
+    });
+    check('(b) insuficiente com mais de 3 dias foi gravada', oldInsufficient > 0, `count=${oldInsufficient}`);
+
+    const recentOk = await prisma.indicatorSnapshot.count({
+      where: { formulaVersion: WAIT_FV, status: 'ok', asOf: { gte: waitCutoff } },
+    });
+    check('(c) linha ok recente foi gravada', recentOk > 0, `count=${recentOk}`);
+
+    const atrPersisted = await prisma.indicatorSnapshot.count({ where: { formulaVersion: WAIT_FV, indicator: 'atr' } });
+    check('(d) atr foi gravado', atrPersisted === 1, `count=${atrPersisted}`);
+
+    const waitSecond = await prisma.indicatorSnapshot.createMany({ data: waitSelection.toWrite, skipDuplicates: true });
+    check('(e) segunda execução com espera não duplica', waitSecond.count === 0, `inserted=${waitSecond.count}`);
   } finally {
     await prisma.indicatorSnapshot.deleteMany({ where: { asOf: { gte: asOfs[asOfs.length - 1].date, lte: asOfs[0].date }, formulaVersion: 'v1' } });
+    await prisma.indicatorSnapshot.deleteMany({ where: { formulaVersion: WAIT_FV } });
     await prisma.marketSnapshot.deleteMany({ where: { sourceId: coingecko.id, asset: { in: ['solana', 'bitcoin', 'ethereum'] }, collectedAt: { gte: cleanupFrom, lte: cleanupTo } } });
     await prisma.metricSnapshot.deleteMany({ where: { sourceId: defillamaHistory.id, collectedAt: { gte: cleanupFrom, lte: cleanupTo } } });
     if (coingecko.created) {

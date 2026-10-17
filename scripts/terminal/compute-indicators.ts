@@ -11,10 +11,45 @@ import {
   INDICATORS,
   ATR_INDICATOR,
   FORMULA_VERSION,
+  type IndicatorRow,
   type SeriesMap,
 } from './indicators/catalog';
 
 const DEFAULT_DAYS = 365;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Período de espera (em dias) para linhas não-ok (status insufficient_history).
+// A gravação usa createMany + skipDuplicates e NUNCA atualiza uma linha existente:
+// se uma linha insufficient_history for gravada cedo demais, ela fica "congelada"
+// no banco mesmo quando o dado passar a existir. Por isso adiamos a gravação das
+// linhas insufficient_history recentes; numa execução futura, quando o histórico já
+// estiver completo, elas serão gravadas com status ok. Linhas ok e linhas
+// insufficient_history mais antigas que este período seguem gravadas normalmente.
+// Exceção: o atr (status unavailable) continua sendo gravado uma vez, como hoje.
+export const INSUFFICIENT_HISTORY_WAIT_DAYS = 3;
+
+export interface WriteSelection {
+  toWrite: IndicatorRow[];
+  heldByWait: IndicatorRow[];
+}
+
+// Decide quais linhas serão gravadas nesta execução. Retém (heldByWait) apenas as
+// linhas insufficient_history cujo asOf está dentro dos últimos
+// INSUFFICIENT_HISTORY_WAIT_DAYS dias em UTC (asOf >= hoje - WAIT_DAYS). O atr tem
+// status unavailable, então nunca é retido por este filtro.
+export function selectRowsToWrite(rows: IndicatorRow[], todayStartMs: number): WriteSelection {
+  const cutoff = todayStartMs - INSUFFICIENT_HISTORY_WAIT_DAYS * DAY_MS;
+  const toWrite: IndicatorRow[] = [];
+  const heldByWait: IndicatorRow[] = [];
+  for (const row of rows) {
+    if (row.status === 'insufficient_history' && row.asOf.getTime() >= cutoff) {
+      heldByWait.push(row);
+    } else {
+      toWrite.push(row);
+    }
+  }
+  return { toWrite, heldByWait };
+}
 
 function parseDays(): number {
   const idx = process.argv.findIndex((a) => a === '--days' || a.startsWith('--days='));
@@ -66,11 +101,12 @@ async function main(): Promise<void> {
     const series = await loadAllSeries(reader, from, to, todayUtc);
 
     const { rows, statusCounts } = computeIndicatorRows(series, asOfs);
+    const { toWrite, heldByWait } = selectRowsToWrite(rows, todayStart);
 
     if (isDryRun) {
       printDryRun(series, asOfs[0].iso);
       console.log(
-        `[RESUMO] dry-run: calculadas=${rows.length} (nada escrito), ok=${statusCounts.ok ?? 0}, insufficient_history=${statusCounts.insufficient_history ?? 0}, unavailable=${statusCounts.unavailable ?? 0}`
+        `[RESUMO] dry-run: calculadas=${rows.length}, seriam_gravadas=${toWrite.length}, retidas_espera=${heldByWait.length} (nada escrito), ok=${statusCounts.ok ?? 0}, insufficient_history=${statusCounts.insufficient_history ?? 0}, unavailable=${statusCounts.unavailable ?? 0}`
       );
       return;
     }
@@ -83,12 +119,12 @@ async function main(): Promise<void> {
       return;
     }
 
-    const result = await prisma.indicatorSnapshot.createMany({ data: rows, skipDuplicates: true });
+    const result = await prisma.indicatorSnapshot.createMany({ data: toWrite, skipDuplicates: true });
     const inserted = result.count;
-    const duplicated = rows.length - inserted;
+    const duplicated = toWrite.length - inserted;
 
     console.log(
-      `[RESUMO] formulaVersion=${FORMULA_VERSION}: calculadas=${rows.length}, inseridas=${inserted}, ignoradas por duplicidade=${duplicated}, ok=${statusCounts.ok ?? 0}, insufficient_history=${statusCounts.insufficient_history ?? 0}, unavailable=${statusCounts.unavailable ?? 0}`
+      `[RESUMO] formulaVersion=${FORMULA_VERSION}: calculadas=${rows.length}, seriam_gravadas=${toWrite.length}, retidas_espera=${heldByWait.length}, inseridas=${inserted}, ignoradas por duplicidade=${duplicated}, ok=${statusCounts.ok ?? 0}, insufficient_history=${statusCounts.insufficient_history ?? 0}, unavailable=${statusCounts.unavailable ?? 0}`
     );
   } catch (e) {
     console.error('[FATAL]', e instanceof Error ? e.message : String(e).slice(0, 300));
@@ -98,7 +134,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Só executa o fluxo quando o arquivo é o entrypoint (tsx direto). Assim os testes
+// podem importar selectRowsToWrite/INSUFFICIENT_HISTORY_WAIT_DAYS sem disparar o job.
+if (/compute-indicators\.(ts|js)$/.test(process.argv[1] ?? '')) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

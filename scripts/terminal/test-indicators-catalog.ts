@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import type { Reader } from './indicators/loaders';
 import { loadAllSeries, computeIndicatorRows, validateRowInvariants, INDICATORS, type IndicatorRow, type SeriesMap, type AsOfDate } from './indicators/catalog';
+import { selectRowsToWrite, INSUFFICIENT_HISTORY_WAIT_DAYS } from './compute-indicators';
+import { Decimal } from './prisma-types';
 
 interface MarketRow {
   provider: string;
@@ -129,6 +131,61 @@ async function main(): Promise<void> {
 
   check('contagem por status preenchida', (statusCounts.ok ?? 0) > 0 && (statusCounts.insufficient_history ?? 0) > 0 && statusCounts.unavailable === 1,
     JSON.stringify(statusCounts));
+
+  // --- Período de espera para linhas insufficient_history (casos novos) ---
+  const WAIT_TODAY = Date.UTC(2025, 0, 20);
+  const mkRow = (
+    indicator: string,
+    status: string,
+    iso: string,
+    value: IndicatorRow['value'] = null
+  ): IndicatorRow => {
+    const date = new Date(`${iso}T00:00:00.000Z`);
+    const isOk = status === 'ok';
+    return {
+      indicator,
+      scope: 'solana',
+      asOf: date,
+      status,
+      value,
+      unit: 'FRACTION',
+      inputCount: isOk ? 2 : 0,
+      fromDate: isOk ? date : null,
+      toDate: isOk ? date : null,
+      reason: isOk ? null : 'motivo de teste',
+      formulaVersion: 'v1',
+    };
+  };
+
+  check('período de espera = 3 dias', INSUFFICIENT_HISTORY_WAIT_DAYS === 3, `WAIT_DAYS=${INSUFFICIENT_HISTORY_WAIT_DAYS}`);
+
+  const sel = selectRowsToWrite(
+    [
+      mkRow('return_30d', 'insufficient_history', '2025-01-20'), // hoje-0 -> retida
+      mkRow('return_30d', 'insufficient_history', '2025-01-18'), // hoje-2 -> retida
+      mkRow('return_30d', 'insufficient_history', '2025-01-17'), // hoje-3 -> retida (limite)
+      mkRow('return_30d', 'insufficient_history', '2025-01-16'), // hoje-4 -> gravada
+      mkRow('return_7d', 'ok', '2025-01-19', new Decimal('0.5')), // ok recente -> gravada
+      mkRow('atr', 'unavailable', '2025-01-20'), // atr -> gravada
+    ],
+    WAIT_TODAY
+  );
+
+  check('(a) insufficient_history dentro dos últimos 3 dias não é gravada',
+    !findRow(sel.toWrite, 'return_30d', 'solana', '2025-01-20') &&
+    !!findRow(sel.heldByWait, 'return_30d', 'solana', '2025-01-20'));
+  check('(b) insufficient_history com mais de 3 dias é gravada',
+    !!findRow(sel.toWrite, 'return_30d', 'solana', '2025-01-16') &&
+    !findRow(sel.heldByWait, 'return_30d', 'solana', '2025-01-16'));
+  check('(c) linha ok recente é gravada',
+    !!findRow(sel.toWrite, 'return_7d', 'solana', '2025-01-19') &&
+    !findRow(sel.heldByWait, 'return_7d', 'solana', '2025-01-19'));
+  check('(d) atr (unavailable) é gravado mesmo dentro dos 3 dias',
+    !!findRow(sel.toWrite, 'atr', 'solana', '2025-01-20') &&
+    !findRow(sel.heldByWait, 'atr', 'solana', '2025-01-20'));
+  check('período de espera retém só as insufficient_history recentes',
+    sel.heldByWait.length === 3 && sel.toWrite.length === 3,
+    `toWrite=${sel.toWrite.length} held=${sel.heldByWait.length}`);
 
   console.log(`=== RESULTADO: ${passed} passaram, ${failures} falharam ===`);
   process.exit(failures === 0 ? 0 : 1);
