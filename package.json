@@ -23,7 +23,9 @@
     "test:indicators": "tsx scripts/terminal/test-indicators-catalog.ts",
     "test:indicators:db": "tsx scripts/terminal/test-indicators-db.ts",
     "test:quality:db": "tsx scripts/terminal/test-quality-db.ts",
-    "test:state": "tsx scripts/terminal/state/test-market-state.ts"
+    "test:state": "tsx scripts/terminal/state/test-market-state.ts",
+    "state:compute": "tsx scripts/terminal/state/compute-state.ts",
+    "test:compute-state": "tsx scripts/terminal/state/test-compute-state.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.1",
