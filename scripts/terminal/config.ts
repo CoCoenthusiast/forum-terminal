@@ -202,3 +202,63 @@ export interface BackfillSeriesResult {
   lastDate: string | null;
   ignoredReasons: Record<string, number>;
 }
+
+// ===== SOL State (Fase 5) =====
+// Tudo abaixo são HIPÓTESES TEÓRICAS, não fatos nem previsões. São limites que
+// descrevem o estado atual, escolhidos a dedo e ajustáveis. Mudar qualquer limite
+// exige subir STATE_RULES_VERSION. Os códigos (ruleId, classificações e status)
+// ficam em inglês; os textos explicativos ficam em STATE_RULE_DOC (português),
+// separados, porque o texto visível no site terá de ser traduzido para inglês depois.
+
+export const STATE_RULES_VERSION = 'state_rules_v1';
+export const STATE_VERSION = 'sol_state_v1';
+
+// Tendência: usa só return_7d (solana). +3% / -3% na semana.
+export const STATE_TREND_RETURN7D_BULLISH = 0.03;
+export const STATE_TREND_RETURN7D_BEARISH = -0.03;
+
+// Força relativa: usa só relative_strength_7d contra BTC e contra ETH. +2% / -2%.
+export const STATE_RS_PAIR_STRONG = 0.02;
+export const STATE_RS_PAIR_WEAK = -0.02;
+
+// Spot: atividade de volume (volume_vs_mean_7d solana). +20% / -20% vs média 7d.
+export const STATE_SPOT_DISTANCE_EXPANDING = 0.20;
+export const STATE_SPOT_DISTANCE_CONTRACTING = -0.20;
+
+// Liquidez onchain: stablecoin_supply_vs_mean_7d, tvl_vs_mean_7d e
+// dex_volume_vs_mean_7d (solana). +5% / -5% vs média; maioria de 2 de 3 decide.
+export const STATE_LIQ_VS_MEAN_EXPANDING = 0.05;
+export const STATE_LIQ_VS_MEAN_CONTRACTING = -0.05;
+export const STATE_LIQ_MIN_SIGNALS = 2;
+
+// Frescor por perna: dado mais velho que isso (em dias UTC) não entra na combinação.
+// Todos os indicadores usam 2 dias, exceto o volume DEX, que a fonte atrasa ~3 dias.
+export const STATE_MAX_LEG_LAG_DAYS = 2;
+export const STATE_MAX_LEG_LAG_DAYS_DEX = 4;
+
+// Slots de qualidade de dados: 9 indicadores, peso igual nesta versão.
+export const STATE_DATA_QUALITY_CORE = [
+  { indicator: 'return_7d', scope: 'solana' },
+  { indicator: 'return_30d', scope: 'solana' },
+  { indicator: 'volatility_7d', scope: 'solana' },
+  { indicator: 'relative_strength_7d', scope: 'solana:bitcoin' },
+  { indicator: 'relative_strength_7d', scope: 'solana:ethereum' },
+  { indicator: 'volume_vs_mean_7d', scope: 'solana' },
+  { indicator: 'stablecoin_supply_vs_mean_7d', scope: 'solana' },
+  { indicator: 'tvl_vs_mean_7d', scope: 'solana' },
+  { indicator: 'dex_volume_vs_mean_7d', scope: 'solana' },
+] as const;
+
+// Explicações em português simples para o dono do projeto (iniciante).
+export const STATE_RULE_DOC: Record<string, string> = {
+  trend_return7d_v1:
+    'Tendência do SOL pelo retorno dos últimos 7 dias: subiu 3% ou mais é bullish; caiu 3% ou mais é bearish; no meio disso é neutral. 3% numa semana é o mínimo para não confundir ruído com tendência.',
+  rs_pair_v1:
+    'Força do SOL contra BTC e ETH pela diferença de desempenho em 7 dias. Para ser strong, o SOL precisa superar os dois. Se ficar atrás dos dois, é weak. Se ganhar de um e perder do outro, é neutral.',
+  spot_vsmean7d_v1:
+    'Aqui spot significa APENAS atividade de volume (volume de negociação do SOL comparado com a média de 7 dias). NÃO é fluxo comprador/vendedor nem demanda. 20% acima da média é expanding; 20% abaixo é contracting; no meio é neutral.',
+  liq_vsmean7d_v1:
+    'Liquidez onchain: stablecoins, TVL e volume de DEX no Solana comparados com a média de 7 dias, cada um 5% para cima (expanding) ou para baixo (contracting). Precisa de pelo menos 2 dos 3 sinais concordando; sem isso, é neutral. Se faltar dado, não arrisca palpite.',
+  no_collector_v1:
+    'Sem coletor nesta versão. O campo fica unavailable e não inventamos nenhum valor.',
+};
