@@ -18,9 +18,12 @@ export const INDICATOR_FORMULA_VERSION = 'v1';
 // atraso tolerado (DEX, 4 dias). Fica local porque config.ts não é alterável aqui.
 export const READ_WINDOW_DAYS = 10;
 
-// Backfill: máximo de dias por execução e tamanho do lote de upserts por transação.
+// Backfill: máximo de dias por execução, tamanho do lote de upserts, e limites da
+// transação interativa (lotes menores + timeout maior por causa do pooler remoto).
 export const MAX_BACKFILL_DAYS = 370;
-export const SAVE_BATCH_SIZE = 50;
+export const SAVE_BATCH_SIZE = 20;
+export const SAVE_TX_TIMEOUT_MS = 60000;
+export const SAVE_TX_MAX_WAIT_MS = 15000;
 
 // 'live' = estado do dia padrão (ontem UTC, com --save; --asof igual a ontem também é
 // 'live'). Qualquer outra gravação (--asof mais antigo ou --from/--to) é 'backfill'.
@@ -292,7 +295,9 @@ export async function loadIndicatorRows(
   return rows;
 }
 
-// Grava em lotes de SAVE_BATCH_SIZE upserts por transação. O upsert usa a chave única
+// Grava em lotes de SAVE_BATCH_SIZE upserts. Cada lote roda numa transação
+// INTERATIVA (callback, não array) com timeout próprio, porque o pooler remoto
+// derruba transações antigas. O upsert usa a chave única
 // (asOf, stateVersion, rulesVersion, computeMode), então rodar de novo no mesmo dia
 // reescreve a mesma linha (idempotente) e um backfill não toca nas linhas 'live'.
 export async function saveMarketStates(
@@ -303,36 +308,47 @@ export async function saveMarketStates(
   let written = 0;
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
-    await prisma.$transaction(
-      batch.map((row) =>
-        prisma.marketState.upsert({
-          where: {
-            asOf_stateVersion_rulesVersion_computeMode: {
-              asOf: row.asOf,
-              stateVersion: row.stateVersion,
-              rulesVersion: row.rulesVersion,
-              computeMode: row.computeMode,
-            },
-          },
-          create: {
-            asOf: row.asOf,
-            stateVersion: row.stateVersion,
-            rulesVersion: row.rulesVersion,
-            computeMode: row.computeMode,
-            dataQualityScore: row.dataQualityScore,
-            oldestDataDate: row.oldestDataDate,
-            payload: row.payload as unknown as Prisma.InputJsonValue,
-            computedAt: row.computedAt,
-          },
-          update: {
-            dataQualityScore: row.dataQualityScore,
-            oldestDataDate: row.oldestDataDate,
-            payload: row.payload as unknown as Prisma.InputJsonValue,
-            computedAt: row.computedAt,
-          },
-        })
-      )
-    );
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          for (const row of batch) {
+            await tx.marketState.upsert({
+              where: {
+                asOf_stateVersion_rulesVersion_computeMode: {
+                  asOf: row.asOf,
+                  stateVersion: row.stateVersion,
+                  rulesVersion: row.rulesVersion,
+                  computeMode: row.computeMode,
+                },
+              },
+              create: {
+                asOf: row.asOf,
+                stateVersion: row.stateVersion,
+                rulesVersion: row.rulesVersion,
+                computeMode: row.computeMode,
+                dataQualityScore: row.dataQualityScore,
+                oldestDataDate: row.oldestDataDate,
+                payload: row.payload as unknown as Prisma.InputJsonValue,
+                computedAt: row.computedAt,
+              },
+              update: {
+                dataQualityScore: row.dataQualityScore,
+                oldestDataDate: row.oldestDataDate,
+                payload: row.payload as unknown as Prisma.InputJsonValue,
+                computedAt: row.computedAt,
+              },
+            });
+          }
+        },
+        { timeout: SAVE_TX_TIMEOUT_MS, maxWait: SAVE_TX_MAX_WAIT_MS }
+      );
+    } catch (e) {
+      const first = batch[0]?.asOf.toISOString().slice(0, 10) ?? '?';
+      const last = batch[batch.length - 1]?.asOf.toISOString().slice(0, 10) ?? '?';
+      const detail = e instanceof Error ? e.message : String(e);
+      console.error(`[SAVE] lote ${first}..${last} falhou: ${detail.slice(0, 200)} — rodar de novo é seguro (idempotente)`);
+      throw e;
+    }
     written += batch.length;
   }
   return written;

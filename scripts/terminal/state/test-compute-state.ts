@@ -7,6 +7,9 @@ import { computeMarketState } from './market-state';
 import {
   MAX_BACKFILL_DAYS,
   READ_WINDOW_DAYS,
+  SAVE_BATCH_SIZE,
+  SAVE_TX_MAX_WAIT_MS,
+  SAVE_TX_TIMEOUT_MS,
   buildBackfillInputs,
   buildDayList,
   buildMarketStateInput,
@@ -91,7 +94,7 @@ function bearishRows(): IndicatorRowRaw[] {
 }
 
 // ---------- Seção pura (sempre roda, sem banco) ----------
-function runPureSection(): void {
+async function runPureSection(): Promise<void> {
   // decimalToNumber
   check('decimal: Decimal-string -> número', decimalToNumber(dec('123.45')) === 123.45);
   check('decimal: string -> número', decimalToNumber('0.5') === 0.5);
@@ -269,6 +272,68 @@ function runPureSection(): void {
   check('persist: score 0 não grava', shouldPersist(emptyState) === false);
   check('persist: score > 0 grava', shouldPersist(bullState) === true);
   check('row: oldestDataDate null quando vazio', toMarketStateRow(emptyState, 'backfill', rowNow).oldestDataDate === null);
+
+  // saveMarketStates: transação interativa (callback, não array), timeout alto, lote <= 20
+  interface FakeCall { isFn: boolean; timeout: number | undefined; maxWait: number | undefined; count: number }
+  const fakeCalls: FakeCall[] = [];
+  const upsertArgs: unknown[] = [];
+  const fakeTx = {
+    marketState: {
+      upsert: (args: unknown) => {
+        upsertArgs.push(args);
+        return Promise.resolve({});
+      },
+    },
+  };
+  const fakeClient = {
+    $transaction: async (arg0: unknown, options?: { timeout?: number; maxWait?: number }) => {
+      const before = upsertArgs.length;
+      const isFn = typeof arg0 === 'function';
+      if (isFn) await (arg0 as (tx: unknown) => Promise<void>)(fakeTx);
+      fakeCalls.push({ isFn, timeout: options?.timeout, maxWait: options?.maxWait, count: upsertArgs.length - before });
+      return [];
+    },
+  };
+
+  const baseRow = toMarketStateRow(bullState, 'backfill', rowNow);
+  const manyRows = Array.from({ length: 45 }, (_, i) => ({ ...baseRow, asOf: new Date(Date.UTC(2026, 7, 1 + i)) }));
+  const written = await saveMarketStates(fakeClient as unknown as PrismaClient, manyRows);
+  check('save: retorna total escrito', written === 45);
+  check('save: um $transaction por lote', fakeCalls.length === 3);
+  check('save: usa callback e não array', fakeCalls.every((c) => c.isFn === true));
+  check('save: timeout >= 30000', fakeCalls.every((c) => (c.timeout ?? 0) >= 30000));
+  check('save: timeout/maxWait das constantes', fakeCalls.every((c) => c.timeout === SAVE_TX_TIMEOUT_MS && c.maxWait === SAVE_TX_MAX_WAIT_MS));
+  check('save: lote de no máximo 20', fakeCalls.every((c) => c.count <= 20));
+  check('save: tamanhos dos lotes 20/20/5', fakeCalls.map((c) => c.count).join(',') === '20,20,5');
+  check('save: SAVE_BATCH_SIZE = 20', SAVE_BATCH_SIZE === 20);
+
+  // lote que falha: mensagem curta com intervalo, erro e aviso de idempotência
+  let txCount = 0;
+  const fakeFail = {
+    $transaction: async (arg0: unknown) => {
+      txCount++;
+      if (typeof arg0 === 'function') await (arg0 as (tx: unknown) => Promise<void>)(fakeTx);
+      if (txCount === 2) throw new Error('Transaction API error: expired transaction');
+      return [];
+    },
+  };
+  const origError = console.error;
+  const errLines: string[] = [];
+  console.error = ((...a: unknown[]) => {
+    errLines.push(a.map((x) => String(x)).join(' '));
+  }) as typeof console.error;
+  let threw = false;
+  try {
+    await saveMarketStates(fakeFail as unknown as PrismaClient, manyRows);
+  } catch {
+    threw = true;
+  } finally {
+    console.error = origError;
+  }
+  const errText = errLines.join('\n');
+  check('save: lote que falha lança erro', threw === true);
+  check('save: mensagem tem o intervalo do lote', errText.includes('2026-08-21..2026-09-09'));
+  check('save: mensagem avisa que repetir é seguro', errText.includes('rodar de novo é seguro (idempotente)'));
 }
 
 // ---------- Seção de banco (só com TEST_DATABASE_URL local:5433) ----------
@@ -393,7 +458,7 @@ async function runDbSection(url: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  runPureSection();
+  await runPureSection();
 
   const url = process.env.TEST_DATABASE_URL;
   if (url !== undefined && /(localhost|127\.0\.0\.1):5433/.test(url)) {
