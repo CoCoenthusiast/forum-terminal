@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
 import { checkEnvironment } from '../config';
-import type { PrismaClient } from '../generated/db/client';
+import type { Prisma, PrismaClient } from '../generated/db/client';
 import { computeMarketState, type MarketState, type MarketStateInput, type StateIndicatorInput } from './market-state';
 
 // Comando de LEITURA: lê o IndicatorSnapshot, monta o MarketStateInput, chama
@@ -17,6 +17,15 @@ export const INDICATOR_FORMULA_VERSION = 'v1';
 // Janela de leitura: últimos 10 dias UTC inclusivos até o asOf. Cobre até o maior
 // atraso tolerado (DEX, 4 dias). Fica local porque config.ts não é alterável aqui.
 export const READ_WINDOW_DAYS = 10;
+
+// Backfill: máximo de dias por execução e tamanho do lote de upserts por transação.
+export const MAX_BACKFILL_DAYS = 370;
+export const SAVE_BATCH_SIZE = 50;
+
+// 'live' = estado do dia padrão (ontem UTC, com --save; --asof igual a ontem também é
+// 'live'). Qualquer outra gravação (--asof mais antigo ou --from/--to) é 'backfill'.
+// O backfill nunca sobrescreve 'live' porque computeMode faz parte da chave única.
+export type ComputeMode = 'live' | 'backfill';
 
 export interface IndicatorRowRaw {
   indicator: string;
@@ -60,6 +69,10 @@ function isValidIsoDate(iso: string): boolean {
   const day = parseInt(d, 10);
   const date = new Date(Date.UTC(year, month - 1, day));
   return date.getUTCFullYear() === year && date.getUTCMonth() + 1 === month && date.getUTCDate() === day;
+}
+
+function isoStartMs(iso: string): number {
+  return Date.UTC(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)));
 }
 
 // Resolve o asOf de referência: padrão = ontem UTC (último dia fechado); --asof=YYYY-MM-DD
@@ -118,6 +131,140 @@ export function formatShortSummary(state: MarketState): string[] {
   ];
 }
 
+interface FlagRead {
+  present: boolean;
+  value: string | null;
+  error: string | null;
+}
+
+function readFlag(argv: readonly string[], name: string): FlagRead {
+  const arg = argv.find((a) => a === `--${name}` || a.startsWith(`--${name}=`));
+  if (arg === undefined) return { present: false, value: null, error: null };
+  if (arg === `--${name}`) return { present: true, value: null, error: `'--${name}' sem valor` };
+  const value = arg.slice(name.length + 3);
+  if (value === '') return { present: true, value: null, error: `'--${name}=' sem valor` };
+  return { present: true, value, error: null };
+}
+
+export interface RunArgs {
+  mode: 'single' | 'backfill';
+  asOf: string | null;
+  days: string[] | null;
+  save: boolean;
+  computeMode: ComputeMode;
+  error: string | null;
+}
+
+export function buildDayList(fromIso: string, toIso: string): string[] {
+  const days: string[] = [];
+  const end = isoStartMs(toIso);
+  for (let ms = isoStartMs(fromIso); ms <= end; ms += DAY_MS) {
+    days.push(new Date(ms).toISOString().slice(0, 10));
+  }
+  return days;
+}
+
+// Valida as flags ANTES de tocar no banco. --asof (um dia) e --from/--to (intervalo)
+// são mutuamente exclusivos; --from e --to andam juntos; tudo <= ontem UTC.
+export function parseRunArgs(now: Date, argv: readonly string[]): RunArgs {
+  const save = argv.includes('--save');
+  const todayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const yesterdayIso = new Date(todayMs - DAY_MS).toISOString().slice(0, 10);
+
+  const fail = (error: string): RunArgs => ({
+    mode: 'single',
+    asOf: null,
+    days: null,
+    save,
+    computeMode: 'backfill',
+    error,
+  });
+
+  const from = readFlag(argv, 'from');
+  const to = readFlag(argv, 'to');
+  const asof = readFlag(argv, 'asof');
+
+  if (from.error !== null) return fail(from.error);
+  if (to.error !== null) return fail(to.error);
+  if (asof.error !== null) return fail(asof.error);
+
+  const hasFrom = from.present;
+  const hasTo = to.present;
+  const hasAsOf = asof.present;
+
+  if (hasAsOf && (hasFrom || hasTo)) return fail('--asof não pode ser usado junto com --from/--to');
+  if (hasFrom !== hasTo) return fail('--from e --to precisam ser usados juntos');
+
+  if (!hasFrom && !hasTo) {
+    const resolved = resolveAsOf(now, argv);
+    if (resolved.error !== null) return fail(resolved.error);
+    const computeMode: ComputeMode = resolved.asOf === yesterdayIso ? 'live' : 'backfill';
+    return { mode: 'single', asOf: resolved.asOf, days: null, save, computeMode, error: null };
+  }
+
+  const fromIso = from.value as string;
+  const toIso = to.value as string;
+  if (!isValidIsoDate(fromIso)) return fail(`--from inválido: "${fromIso}" (use YYYY-MM-DD)`);
+  if (!isValidIsoDate(toIso)) return fail(`--to inválido: "${toIso}" (use YYYY-MM-DD)`);
+
+  const fromMs = isoStartMs(fromIso);
+  const toMs = isoStartMs(toIso);
+  const yesterdayMs = isoStartMs(yesterdayIso);
+
+  if (fromMs > toMs) return fail(`--from (${fromIso}) é posterior a --to (${toIso})`);
+  if (toMs > yesterdayMs) return fail(`--to (${toIso}) é posterior a ontem UTC (${yesterdayIso})`);
+
+  const span = Math.round((toMs - fromMs) / DAY_MS) + 1;
+  if (span > MAX_BACKFILL_DAYS) return fail(`intervalo de ${span} dias excede o máximo de ${MAX_BACKFILL_DAYS}`);
+
+  return { mode: 'backfill', asOf: null, days: buildDayList(fromIso, toIso), save, computeMode: 'backfill', error: null };
+}
+
+// Calcula o input de cada dia em memória, a partir de UMA leitura só do intervalo.
+// Cada dia usa a janela [dia-9, dia], igual ao buildWindow do modo de um dia.
+export function buildBackfillInputs(rows: readonly IndicatorRowRaw[], daysIso: readonly string[]): MarketStateInput[] {
+  return daysIso.map((day) => {
+    const dayMs = isoStartMs(day);
+    const fromMs = dayMs - (READ_WINDOW_DAYS - 1) * DAY_MS;
+    const slice = rows.filter((row) => {
+      const ms = row.asOf.getTime();
+      return ms >= fromMs && ms <= dayMs;
+    });
+    return buildMarketStateInput(slice, day);
+  });
+}
+
+export interface MarketStateRow {
+  asOf: Date;
+  stateVersion: string;
+  rulesVersion: string;
+  computeMode: ComputeMode;
+  dataQualityScore: number;
+  oldestDataDate: Date | null;
+  payload: MarketState;
+  computedAt: Date;
+}
+
+export function toMarketStateRow(state: MarketState, computeMode: ComputeMode, now: Date): MarketStateRow {
+  const oldest = state.data_quality.oldestAsOf;
+  return {
+    asOf: new Date(isoStartMs(state.asOf)),
+    stateVersion: state.stateVersion,
+    rulesVersion: state.rulesVersion,
+    computeMode,
+    dataQualityScore: state.data_quality.score,
+    oldestDataDate: oldest === null ? null : new Date(isoStartMs(oldest)),
+    payload: state,
+    computedAt: now,
+  };
+}
+
+// Dias sem nenhum sinal utilizável (score 0) não são gravados: não dizem nada e
+// seriam reescritos assim que o dado chegasse.
+export function shouldPersist(state: MarketState): boolean {
+  return state.data_quality.score > 0;
+}
+
 // Única função que fala com o banco. Recebe o client por parâmetro (testável no
 // banco local). formulaVersion é parâmetro para o teste semear uma versão exclusiva
 // sem tocar em linhas reais.
@@ -145,26 +292,109 @@ export async function loadIndicatorRows(
   return rows;
 }
 
+// Grava em lotes de SAVE_BATCH_SIZE upserts por transação. O upsert usa a chave única
+// (asOf, stateVersion, rulesVersion, computeMode), então rodar de novo no mesmo dia
+// reescreve a mesma linha (idempotente) e um backfill não toca nas linhas 'live'.
+export async function saveMarketStates(
+  prisma: PrismaClient,
+  rows: readonly MarketStateRow[],
+  batchSize: number = SAVE_BATCH_SIZE
+): Promise<number> {
+  let written = 0;
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    await prisma.$transaction(
+      batch.map((row) =>
+        prisma.marketState.upsert({
+          where: {
+            asOf_stateVersion_rulesVersion_computeMode: {
+              asOf: row.asOf,
+              stateVersion: row.stateVersion,
+              rulesVersion: row.rulesVersion,
+              computeMode: row.computeMode,
+            },
+          },
+          create: {
+            asOf: row.asOf,
+            stateVersion: row.stateVersion,
+            rulesVersion: row.rulesVersion,
+            computeMode: row.computeMode,
+            dataQualityScore: row.dataQualityScore,
+            oldestDataDate: row.oldestDataDate,
+            payload: row.payload as unknown as Prisma.InputJsonValue,
+            computedAt: row.computedAt,
+          },
+          update: {
+            dataQualityScore: row.dataQualityScore,
+            oldestDataDate: row.oldestDataDate,
+            payload: row.payload as unknown as Prisma.InputJsonValue,
+            computedAt: row.computedAt,
+          },
+        })
+      )
+    );
+    written += batch.length;
+  }
+  return written;
+}
+
+function printState(state: MarketState): void {
+  console.log(JSON.stringify(state, null, 2));
+  for (const line of formatShortSummary(state)) console.log(line);
+}
+
 async function main(): Promise<void> {
-  const resolved = resolveAsOf(new Date(), process.argv);
-  if (resolved.error !== null) {
-    console.error(`[ABORT] ${resolved.error}`);
+  const now = new Date();
+  const args = parseRunArgs(now, process.argv);
+  if (args.error !== null) {
+    console.error(`[ABORT] ${args.error}`);
     process.exit(1);
   }
-  const asOf = resolved.asOf;
 
   checkEnvironment();
 
   const { prisma } = await import('../db');
 
   try {
-    const { from, to } = buildWindow(asOf, READ_WINDOW_DAYS);
-    const rows = await loadIndicatorRows(prisma, from, to);
-    const input = buildMarketStateInput(rows, asOf);
-    const state = computeMarketState(input);
+    if (args.mode === 'single') {
+      const asOf = args.asOf as string;
+      const { from, to } = buildWindow(asOf, READ_WINDOW_DAYS);
+      const rows = await loadIndicatorRows(prisma, from, to);
+      const state = computeMarketState(buildMarketStateInput(rows, asOf));
+      printState(state);
 
-    console.log(JSON.stringify(state, null, 2));
-    for (const line of formatShortSummary(state)) console.log(line);
+      if (!args.save) {
+        console.log('[SAVE] desativado (use --save para gravar)');
+      } else if (!shouldPersist(state)) {
+        console.log('[SAVE] pulado: score 0 (nenhum sinal utilizável)');
+      } else {
+        const written = await saveMarketStates(prisma, [toMarketStateRow(state, args.computeMode, now)]);
+        console.log(
+          `[SAVE] gravados=${written} asOf=${asOf} computeMode=${args.computeMode} stateVersion=${state.stateVersion} rulesVersion=${state.rulesVersion}`
+        );
+      }
+      return;
+    }
+
+    const days = args.days as string[];
+    const fromIso = days[0];
+    const toIso = days[days.length - 1];
+    const loadFrom = buildWindow(fromIso, READ_WINDOW_DAYS).from;
+    const loadTo = new Date(isoStartMs(toIso));
+    const rows = await loadIndicatorRows(prisma, loadFrom, loadTo);
+    const states = buildBackfillInputs(rows, days).map((input) => computeMarketState(input));
+    const skipped = states.filter((s) => !shouldPersist(s)).length;
+    const toWrite = states.filter(shouldPersist).map((s) => toMarketStateRow(s, 'backfill', now));
+
+    if (!args.save) {
+      console.log(
+        `[BACKFILL] dias=${days.length}, pulados_vazios=${skipped}, seriam_gravados=${toWrite.length} (nada escrito; use --save)`
+      );
+      return;
+    }
+
+    const written = await saveMarketStates(prisma, toWrite);
+    console.log(`[BACKFILL] dias=${days.length}, pulados_vazios=${skipped}, gravados=${written}`);
   } catch (e) {
     console.error('[FATAL]', e instanceof Error ? e.message : String(e).slice(0, 300));
     process.exitCode = 1;

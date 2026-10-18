@@ -5,13 +5,20 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Decimal } from '../prisma-types';
 import { computeMarketState } from './market-state';
 import {
+  MAX_BACKFILL_DAYS,
   READ_WINDOW_DAYS,
+  buildBackfillInputs,
+  buildDayList,
   buildMarketStateInput,
   buildWindow,
   decimalToNumber,
   formatShortSummary,
   loadIndicatorRows,
+  parseRunArgs,
   resolveAsOf,
+  saveMarketStates,
+  shouldPersist,
+  toMarketStateRow,
   type IndicatorRowRaw,
 } from './compute-state';
 
@@ -201,24 +208,105 @@ function runPureSection(): void {
   check('resumo: weak', bearSummary.includes('Força relativa: weak'));
   check('resumo: spot contracting', bearSummary.includes('Spot: contracting'));
   check('resumo: liquidez contracting', bearSummary.includes('Liquidez onchain: contracting'));
+
+  // parseRunArgs / computeMode
+  const refNow = new Date('2026-10-18T10:00:00Z'); // ontem = 2026-10-17
+  const def = parseRunArgs(refNow, ['--save']);
+  check('args: default é single de ontem', def.mode === 'single' && def.asOf === '2026-10-17' && def.error === null);
+  check('args: default com --save é live', def.computeMode === 'live' && def.save === true);
+  const noSave = parseRunArgs(refNow, []);
+  check('args: sem --save continua single', noSave.mode === 'single' && noSave.save === false);
+  check('args: --asof igual a ontem é live', parseRunArgs(refNow, ['--asof=2026-10-17']).computeMode === 'live');
+  check('args: --asof mais antigo é backfill', parseRunArgs(refNow, ['--asof=2026-10-16']).computeMode === 'backfill');
+
+  check('args: --from sem --to aborta', parseRunArgs(refNow, ['--from=2026-10-01']).error !== null);
+  check('args: --to sem --from aborta', parseRunArgs(refNow, ['--to=2026-10-01']).error !== null);
+  check('args: from > to aborta', parseRunArgs(refNow, ['--from=2026-10-10', '--to=2026-10-01']).error !== null);
+  check('args: --asof junto com --from aborta', parseRunArgs(refNow, ['--asof=2026-10-10', '--from=2026-10-01', '--to=2026-10-02']).error !== null);
+  check('args: --to posterior a ontem aborta', parseRunArgs(refNow, ['--from=2026-10-01', '--to=2026-10-18']).error !== null);
+  check('args: --from inválido aborta', parseRunArgs(refNow, ['--from=2026-02-30', '--to=2026-03-01']).error !== null);
+
+  const ok370 = parseRunArgs(refNow, ['--from=2025-10-13', '--to=2026-10-17']);
+  check('args: intervalo de 370 dias ok', ok370.error === null && (ok370.days?.length ?? 0) === MAX_BACKFILL_DAYS);
+  check('args: intervalo de 371 dias aborta', parseRunArgs(refNow, ['--from=2025-10-12', '--to=2026-10-17']).error !== null);
+
+  const bf = parseRunArgs(refNow, ['--from=2026-10-01', '--to=2026-10-03', '--save']);
+  check('args: modo backfill', bf.mode === 'backfill' && bf.computeMode === 'backfill' && bf.save === true);
+  check('args: backfill lista os dias', (bf.days ?? []).join(',') === '2026-10-01,2026-10-02,2026-10-03');
+
+  // buildDayList
+  check('dias: from == to -> 1 dia', buildDayList('2026-10-05', '2026-10-05').length === 1);
+  check('dias: 3 dias inclusive nas pontas', buildDayList('2026-10-01', '2026-10-03').join(',') === '2026-10-01,2026-10-02,2026-10-03');
+
+  // buildBackfillInputs: janela por dia, sem ver o futuro
+  const bfRows = [
+    row('return_7d', 'solana', dec('0.05'), { asOf: new Date('2026-10-10T00:00:00Z') }),
+    row('return_7d', 'solana', dec('0.09'), { asOf: new Date('2026-10-11T00:00:00Z') }),
+    row('return_7d', 'solana', dec('0.12'), { asOf: new Date('2026-10-12T00:00:00Z') }),
+  ];
+  const bfInputs = buildBackfillInputs(bfRows, ['2026-10-10', '2026-10-11']);
+  check('backfill: um input por dia', bfInputs.length === 2);
+  check('backfill: dia 10 não vê o futuro', bfInputs[0].indicators.every((i) => i.asOf <= '2026-10-10'));
+  const d10 = computeMarketState(bfInputs[0]).sol_trend.evidence[0]?.value ?? null;
+  const d11 = computeMarketState(bfInputs[1]).sol_trend.evidence[0]?.value ?? null;
+  check('backfill: dia 10 usa valor do dia 10', approx(d10, 0.05));
+  check('backfill: dia 11 usa valor do dia 11', approx(d11, 0.09));
+  check('backfill: dia 10 bullish', computeMarketState(bfInputs[0]).sol_trend.classification === 'bullish');
+
+  // toMarketStateRow
+  const rowNow = new Date('2026-10-18T12:00:00Z');
+  const msRow = toMarketStateRow(bullState, 'live', rowNow);
+  check('row: asOf vira Date UTC', msRow.asOf.toISOString() === '2026-10-17T00:00:00.000Z');
+  check('row: computeMode guardado', msRow.computeMode === 'live');
+  check('row: versions do estado', msRow.stateVersion === bullState.stateVersion && msRow.rulesVersion === bullState.rulesVersion);
+  check('row: score 9/9 = 1', approx(msRow.dataQualityScore, 1));
+  check('row: oldestDataDate', msRow.oldestDataDate?.toISOString() === '2026-10-17T00:00:00.000Z');
+  check('row: payload é o estado completo', msRow.payload === bullState);
+  check('row: computedAt usa now', msRow.computedAt === rowNow);
+  check('row: score parcial 8/9', approx(toMarketStateRow(brokenState, 'backfill', rowNow).dataQualityScore, 8 / 9));
+
+  const emptyState = computeMarketState(buildMarketStateInput([], '2026-10-17'));
+  check('persist: score 0 não grava', shouldPersist(emptyState) === false);
+  check('persist: score > 0 grava', shouldPersist(bullState) === true);
+  check('row: oldestDataDate null quando vazio', toMarketStateRow(emptyState, 'backfill', rowNow).oldestDataDate === null);
 }
 
 // ---------- Seção de banco (só com TEST_DATABASE_URL local:5433) ----------
 async function runDbSection(url: string): Promise<void> {
   const TEST_FV = 'v1-compute-state-test';
+  const KEEP_ASOF = '2001-01-03'; // data de teste isolada de qualquer dado real
+  const CLEAN_FROM = new Date('2000-12-25T00:00:00Z');
+  const CLEAN_TO = new Date('2001-01-04T00:00:00Z');
   const parsed = new URL(url);
   console.log(`[TEST] DB: ${parsed.hostname}:${parsed.port}/${parsed.pathname.slice(1)}`);
 
   const adapter = new PrismaPg({ connectionString: url });
   const prisma = new PrismaClient({ adapter });
 
-  const now = new Date();
-  const todayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  const asOfMs = todayStartMs - DAY_MS;
-  const asOfIso = new Date(asOfMs).toISOString().slice(0, 10);
-  const dexDate = new Date(asOfMs - 2 * DAY_MS);
+  const asOfMs = Date.UTC(2001, 0, 3);
+  const asOfDate = new Date(asOfMs);
 
   try {
+    // Cria a tabela SÓ no banco local (sem RLS, policy, grants nem papel).
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "MarketState" (
+        "id" TEXT NOT NULL,
+        "asOf" DATE NOT NULL,
+        "stateVersion" TEXT NOT NULL,
+        "rulesVersion" TEXT NOT NULL,
+        "computeMode" TEXT NOT NULL,
+        "dataQualityScore" DECIMAL(6,5) NOT NULL,
+        "oldestDataDate" DATE,
+        "payload" JSONB NOT NULL,
+        "computedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT "MarketState_pkey" PRIMARY KEY ("id")
+      )
+    `);
+    await prisma.$executeRawUnsafe(
+      `CREATE UNIQUE INDEX IF NOT EXISTS "MarketState_asOf_stateVersion_rulesVersion_computeMode_key"
+         ON "MarketState"("asOf", "stateVersion", "rulesVersion", "computeMode")`
+    );
+
     await prisma.indicatorSnapshot.deleteMany({ where: { formulaVersion: TEST_FV } });
 
     const seeds: { indicator: string; scope: string; value: string; asOf: Date }[] = [
@@ -230,7 +318,7 @@ async function runDbSection(url: string): Promise<void> {
       { indicator: 'volume_vs_mean_7d', scope: 'solana', value: '0.25', asOf: new Date(asOfMs) },
       { indicator: 'stablecoin_supply_vs_mean_7d', scope: 'solana', value: '0.06', asOf: new Date(asOfMs) },
       { indicator: 'tvl_vs_mean_7d', scope: 'solana', value: '0.07', asOf: new Date(asOfMs) },
-      { indicator: 'dex_volume_vs_mean_7d', scope: 'solana', value: '0.08', asOf: dexDate },
+      { indicator: 'dex_volume_vs_mean_7d', scope: 'solana', value: '0.08', asOf: new Date(asOfMs - 2 * DAY_MS) },
     ];
 
     await prisma.indicatorSnapshot.createMany({
@@ -246,21 +334,56 @@ async function runDbSection(url: string): Promise<void> {
       })),
     });
 
-    const { from, to } = buildWindow(asOfIso, READ_WINDOW_DAYS);
+    const { from, to } = buildWindow(KEEP_ASOF, READ_WINDOW_DAYS);
     const rows = await loadIndicatorRows(prisma, from, to, TEST_FV);
     check('db: lê 9 linhas da versão de teste', rows.length === 9, `(recebeu ${rows.length})`);
-
-    const input = buildMarketStateInput(rows, asOfIso);
-    const state = computeMarketState(input);
+    const state = computeMarketState(buildMarketStateInput(rows, KEEP_ASOF));
     check('db: tendência bullish', state.sol_trend.classification === 'bullish', `(${state.sol_trend.classification})`);
-    check('db: força relativa strong', state.sol_relative_strength.classification === 'strong');
-    check('db: liquidez expanding', state.onchain_liquidity.classification === 'expanding');
-    check('db: qualidade 9/9', state.data_quality.slotsOk === 9 && state.data_quality.slotsTotal === 9);
-    check('db: asOf mais antigo = DEX 2 dias atrás', state.data_quality.oldestAsOf === dexDate.toISOString().slice(0, 10));
+
+    const firstNow = new Date('2001-01-04T00:00:00Z');
+    const liveWhere = {
+      asOf_stateVersion_rulesVersion_computeMode: {
+        asOf: asOfDate,
+        stateVersion: state.stateVersion,
+        rulesVersion: state.rulesVersion,
+        computeMode: 'live' as const,
+      },
+    };
+
+    // 1) grava o estado 'live'
+    await saveMarketStates(prisma, [toMarketStateRow(state, 'live', firstNow)]);
+    check('db: gravou 1 linha live', (await prisma.marketState.count({ where: { asOf: asOfDate, computeMode: 'live' } })) === 1);
+
+    // 2) idempotência: gravar de novo no mesmo dia não duplica
+    await saveMarketStates(prisma, [toMarketStateRow(state, 'live', new Date('2001-01-05T00:00:00Z'))]);
+    check('db: re-gravar live não duplica', (await prisma.marketState.count({ where: { asOf: asOfDate, computeMode: 'live' } })) === 1);
+
+    // 3) backfill NÃO sobrescreve a linha 'live'
+    const liveBefore = await prisma.marketState.findUnique({ where: liveWhere });
+    await saveMarketStates(prisma, [toMarketStateRow(state, 'backfill', new Date('2001-02-01T00:00:00Z'))]);
+    const liveAfter = await prisma.marketState.findUnique({ where: liveWhere });
+    check('db: backfill cria linha própria', (await prisma.marketState.count({ where: { asOf: asOfDate, computeMode: 'backfill' } })) === 1);
+    check('db: backfill não altera computedAt do live', liveBefore?.computedAt.getTime() === liveAfter?.computedAt.getTime());
+    check('db: live e backfill coexistem', (await prisma.marketState.count({ where: { asOf: asOfDate } })) === 2);
+
+    // 4) backfill idempotente
+    await saveMarketStates(prisma, [toMarketStateRow(state, 'backfill', new Date('2001-02-02T00:00:00Z'))]);
+    check('db: re-gravar backfill não duplica', (await prisma.marketState.count({ where: { asOf: asOfDate } })) === 2);
+
+    // 5) leitura de volta
+    const readBack = await prisma.marketState.findUnique({ where: liveWhere });
+    check('db: score lido 9/9', approx(Number(readBack?.dataQualityScore ?? 0), 1));
+    check('db: oldestDataDate lido', readBack?.oldestDataDate?.toISOString() === '2001-01-01T00:00:00.000Z');
+
+    // 6) score 0 não é gravado
+    const emptyState = computeMarketState(buildMarketStateInput([], KEEP_ASOF));
+    if (shouldPersist(emptyState)) await saveMarketStates(prisma, [toMarketStateRow(emptyState, 'backfill', firstNow)]);
+    check('db: não grava score 0', (await prisma.marketState.count({ where: { asOf: asOfDate, computeMode: 'backfill' } })) === 1);
   } catch (e) {
     check('db: seção de banco executou', false, e instanceof Error ? e.message : String(e));
   } finally {
     try {
+      await prisma.marketState.deleteMany({ where: { asOf: { gte: CLEAN_FROM, lte: CLEAN_TO } } });
       await prisma.indicatorSnapshot.deleteMany({ where: { formulaVersion: TEST_FV } });
     } catch {
       // limpeza best-effort

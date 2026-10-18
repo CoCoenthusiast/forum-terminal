@@ -138,3 +138,18 @@ model IndicatorSnapshot {
   @@unique([indicator, scope, asOf, formulaVersion])
   @@index([scope, indicator, asOf])
 }
+
+model MarketState {
+  id               String    @id @default(cuid())
+  asOf             DateTime  @db.Date
+  stateVersion     String
+  rulesVersion     String
+  computeMode      String
+  dataQualityScore Decimal   @db.Decimal(6, 5)
+  oldestDataDate   DateTime? @db.Date
+  payload          Json
+  computedAt       DateTime  @default(now())
+
+  @@unique([asOf, stateVersion, rulesVersion, computeMode])
+  @@index([stateVersion, asOf])
+}
