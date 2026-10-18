@@ -34,7 +34,13 @@ jobs:
         env:
           TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
           COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
+      - run: npx tsx scripts/terminal/backfill-history.ts --only=defillama
+        env:
+          TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
       - run: npx tsx scripts/terminal/backfill-history.ts --upgrade-closes
         env:
           TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
           COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
+      - run: npx tsx scripts/terminal/compute-indicators.ts --days=5
+        env:
+          TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
