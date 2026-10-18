@@ -15,6 +15,7 @@
     "test:loaders": "tsx scripts/terminal/indicators/test-loaders.ts",
     "test:quality": "tsx scripts/terminal/test-quality.ts",
     "test:backfill": "tsx scripts/terminal/test-backfill.ts",
+    "test:backfill-only": "tsx scripts/terminal/test-backfill-only.ts",
     "test:dailyclose-history": "tsx scripts/terminal/test-dailyclose-history.ts",
     "test:dailyclose": "tsx scripts/terminal/test-dailyclose.ts",
     "test:dailyclose-correction": "tsx scripts/terminal/test-dailyclose-correction.ts",

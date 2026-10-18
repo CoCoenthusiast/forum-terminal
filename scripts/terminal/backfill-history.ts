@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { pathToFileURL } from 'node:url';
 import type { PrismaClient } from './generated/db/client';
 import { Decimal } from './prisma-types';
 import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
@@ -161,6 +162,16 @@ async function runMetricBackfill(
   return { name: operation, received, ignored, invalid, inserted, firstDate, lastDate, ignoredReasons };
 }
 
+export type OnlyProvider = 'coingecko' | 'defillama';
+
+export function parseOnlyFlag(argv: readonly string[]): { only: OnlyProvider | null; error: string | null } {
+  const arg = argv.find((a) => a.startsWith('--only='));
+  if (arg === undefined) return { only: null, error: null };
+  const value = arg.slice('--only='.length);
+  if (value === 'coingecko' || value === 'defillama') return { only: value, error: null };
+  return { only: null, error: `valor de --only não suportado: "${arg}"` };
+}
+
 async function runUpgradeCloses(): Promise<void> {
   const lookbackArg = process.argv.find((a) => a.startsWith('--lookback='));
   let lookback = 30;
@@ -207,12 +218,14 @@ async function main() {
     daysOverride = parsed;
   }
 
-  const onlyArg = process.argv.find((a) => a.startsWith('--only='));
-  const onlyCoingecko = onlyArg === '--only=coingecko';
-  if (onlyArg !== undefined && !onlyCoingecko) {
-    console.error(`[ABORT] valor de --only não suportado: "${onlyArg}"`);
+  const onlyResult = parseOnlyFlag(process.argv);
+  if (onlyResult.error !== null) {
+    console.error(`[ABORT] ${onlyResult.error}`);
     process.exit(1);
   }
+  const only = onlyResult.only;
+  const onlyCoingecko = only === 'coingecko';
+  const onlyDefillama = only === 'defillama';
 
   const effectiveDays = daysOverride ?? BACKFILL_CG_DAYS;
   const includeTodayMidnight = daysOverride !== null;
@@ -223,17 +236,19 @@ async function main() {
   if (isDryRun) {
     console.log('[DRY-RUN] Modo simulação - sem escrita no banco');
     try {
-      console.log(`Buscando dados CoinGecko (dias=${effectiveDays}, includeTodayMidnight=${includeTodayMidnight})...`);
-      for (const asset of BACKFILL_CG_ASSETS) {
-        const data = await fetchCoinGeckoHistory(asset, effectiveDays);
-        console.log(`${asset}: ${data.prices.length} pontos brutos`);
-        const filtered = filterAndValidatePricePoints(data.prices, data.market_caps, data.total_volumes, asset, todayStartMs, includeTodayMidnight);
-        console.log(`  válidos: ${filtered.valid.length}, ignorados: ${filtered.ignored} (${JSON.stringify(filtered.ignoredReasons)}), inválidos: ${filtered.invalid}`);
-        if (filtered.valid.length > 0) {
-          console.log(`  primeira data: ${filtered.valid[0].collectedAt.toISOString().slice(0, 10)}, última: ${filtered.valid[filtered.valid.length - 1].collectedAt.toISOString().slice(0, 10)}`);
-        }
-        if (asset !== BACKFILL_CG_ASSETS[BACKFILL_CG_ASSETS.length - 1]) {
-          await new Promise(r => setTimeout(r, BACKFILL_CG_PAUSE_MS));
+      if (!onlyDefillama) {
+        console.log(`Buscando dados CoinGecko (dias=${effectiveDays}, includeTodayMidnight=${includeTodayMidnight})...`);
+        for (const asset of BACKFILL_CG_ASSETS) {
+          const data = await fetchCoinGeckoHistory(asset, effectiveDays);
+          console.log(`${asset}: ${data.prices.length} pontos brutos`);
+          const filtered = filterAndValidatePricePoints(data.prices, data.market_caps, data.total_volumes, asset, todayStartMs, includeTodayMidnight);
+          console.log(`  válidos: ${filtered.valid.length}, ignorados: ${filtered.ignored} (${JSON.stringify(filtered.ignoredReasons)}), inválidos: ${filtered.invalid}`);
+          if (filtered.valid.length > 0) {
+            console.log(`  primeira data: ${filtered.valid[0].collectedAt.toISOString().slice(0, 10)}, última: ${filtered.valid[filtered.valid.length - 1].collectedAt.toISOString().slice(0, 10)}`);
+          }
+          if (asset !== BACKFILL_CG_ASSETS[BACKFILL_CG_ASSETS.length - 1]) {
+            await new Promise(r => setTimeout(r, BACKFILL_CG_PAUSE_MS));
+          }
         }
       }
 
@@ -271,21 +286,23 @@ async function main() {
   const results: BackfillSeriesResult[] = [];
 
   try {
-    const cgSourceId = await upsertDataSource(prisma, 'coingecko_history', 'CoinGecko (histórico)', 'https://api.coingecko.com/api/v3');
+    const cgSourceId = onlyDefillama ? null : await upsertDataSource(prisma, 'coingecko_history', 'CoinGecko (histórico)', 'https://api.coingecko.com/api/v3');
     const llamaSourceId = onlyCoingecko ? null : await upsertDataSource(prisma, 'defillama_history', 'DefiLlama (histórico)', 'https://api.llama.fi');
 
-    for (const asset of BACKFILL_CG_ASSETS) {
-      try {
-        console.log(`Executando backfill de preço para ${asset} (dias=${effectiveDays})...`);
-        const res = await runPriceBackfill(prisma, cgSourceId, asset, todayStartMs, effectiveDays, includeTodayMidnight);
-        results.push(res);
-        if (res.inserted > 0 || res.ignored > 0 || res.invalid > 0) allFailed = false;
-        console.log(`  ${res.name}: recebidos=${res.received}, ignorados=${res.ignored}, inválidos=${res.invalid}, inseridos=${res.inserted}, primeiro=${res.firstDate}, último=${res.lastDate}`);
-      } catch (e) {
-        console.error(`  ${asset} falhou:`, e instanceof Error ? e.message : String(e).slice(0, 300));
-      }
-      if (asset !== BACKFILL_CG_ASSETS[BACKFILL_CG_ASSETS.length - 1]) {
-        await new Promise(r => setTimeout(r, BACKFILL_CG_PAUSE_MS));
+    if (cgSourceId) {
+      for (const asset of BACKFILL_CG_ASSETS) {
+        try {
+          console.log(`Executando backfill de preço para ${asset} (dias=${effectiveDays})...`);
+          const res = await runPriceBackfill(prisma, cgSourceId, asset, todayStartMs, effectiveDays, includeTodayMidnight);
+          results.push(res);
+          if (res.inserted > 0 || res.ignored > 0 || res.invalid > 0) allFailed = false;
+          console.log(`  ${res.name}: recebidos=${res.received}, ignorados=${res.ignored}, inválidos=${res.invalid}, inseridos=${res.inserted}, primeiro=${res.firstDate}, último=${res.lastDate}`);
+        } catch (e) {
+          console.error(`  ${asset} falhou:`, e instanceof Error ? e.message : String(e).slice(0, 300));
+        }
+        if (asset !== BACKFILL_CG_ASSETS[BACKFILL_CG_ASSETS.length - 1]) {
+          await new Promise(r => setTimeout(r, BACKFILL_CG_PAUSE_MS));
+        }
       }
     }
 
@@ -343,4 +360,8 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  main().catch((e) => { console.error(e); process.exit(1); });
+}
