@@ -44,3 +44,6 @@ jobs:
       - run: npx tsx scripts/terminal/compute-indicators.ts --days=5
         env:
           TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
+      - run: npx tsx scripts/terminal/state/compute-state.ts --save
+        env:
+          TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
