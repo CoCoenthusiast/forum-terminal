@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { pathToFileURL } from 'node:url';
 import type { PrismaClient } from './generated/db/client';
-import { checkEnvironment, QUALITY_LOG_OPERATION_MAP, QUALITY_FAILED_LAST_N, QUALITY_HISTORICAL_SOURCE_SUFFIX } from './config';
-import { evaluateMetricQuality, summarizeSource, QualityInput, MetricStatus } from './quality';
+import { checkEnvironment, QUALITY_LOG_OPERATION_MAP, QUALITY_FAILED_LAST_N, QUALITY_HISTORICAL_SOURCE_SUFFIX, getHistoricalMaxLagDays } from './config';
+import { evaluateMetricQuality, summarizeSource, classifyDailyCloseMethod, QualityInput, MetricStatus } from './quality';
 
 export interface QualityRow {
   source: string;
@@ -9,6 +10,7 @@ export interface QualityRow {
   metric: string;
   value: number | null;
   collectedAt: Date;
+  sourceTs: Date | null;
   ageMin: number;
   status: MetricStatus;
   reason: string;
@@ -93,6 +95,7 @@ export async function buildQualityRows(prisma: PrismaClient, now: Date): Promise
       recentLogs: recentLogs.map(l => ({ status: l.status, endpoint: l.endpoint, operation: l.operation })),
       now,
       isHistorical,
+      historicalMaxLagDays: isHistorical ? getHistoricalMaxLagDays(metric) : undefined,
     };
 
     const result = evaluateMetricQuality(input);
@@ -100,7 +103,7 @@ export async function buildQualityRows(prisma: PrismaClient, now: Date): Promise
 
     let reason = result.reason;
     if (isHistorical && result.status === 'fresh') {
-      reason += ` (última data: ${latest.collectedAt.toISOString().slice(0, 10)})`;
+      reason += ` (última data: ${(latest.sourceTs ?? latest.collectedAt).toISOString().slice(0, 10)})`;
     } else if (!operation && result.status === 'fresh') {
       reason += ' (sem mapeamento de log)';
     }
@@ -111,6 +114,7 @@ export async function buildQualityRows(prisma: PrismaClient, now: Date): Promise
       metric,
       value: latest.value ? Number(latest.value) : null,
       collectedAt: latest.collectedAt,
+      sourceTs: latest.sourceTs || null,
       ageMin,
       status: result.status,
       reason,
@@ -143,6 +147,7 @@ export async function buildQualityRows(prisma: PrismaClient, now: Date): Promise
       recentLogs: recentLogs.map(l => ({ status: l.status, endpoint: l.endpoint, operation: l.operation })),
       now,
       isHistorical,
+      historicalMaxLagDays: isHistorical ? getHistoricalMaxLagDays('price') : undefined,
     };
 
     const result = evaluateMetricQuality(input);
@@ -150,7 +155,7 @@ export async function buildQualityRows(prisma: PrismaClient, now: Date): Promise
 
     let reason = result.reason;
     if (isHistorical && result.status === 'fresh') {
-      reason += ` (última data: ${latest.collectedAt.toISOString().slice(0, 10)})`;
+      reason += ` (última data: ${(latest.sourceTs ?? latest.collectedAt).toISOString().slice(0, 10)})`;
     } else if (!operation && result.status === 'fresh') {
       reason += ' (sem mapeamento de log)';
     }
@@ -161,6 +166,7 @@ export async function buildQualityRows(prisma: PrismaClient, now: Date): Promise
       metric: 'price',
       value: latest.priceUsd ? Number(latest.priceUsd) : null,
       collectedAt: latest.collectedAt,
+      sourceTs: latest.sourceTs || null,
       ageMin,
       status: result.status,
       reason,
@@ -212,6 +218,33 @@ async function main() {
       const histLabel = isHistorical ? ' (histórico)' : '';
       console.log(`${source}${histLabel}: ${summary} (fresh=${statuses.filter(s=>s==='fresh').length}, unverified=${statuses.filter(s=>s==='unverified').length}, stale=${statuses.filter(s=>s==='stale').length}, failed=${statuses.filter(s=>s==='failed').length})`);
     }
+
+    const dailyCloseAssets = ['solana', 'bitcoin', 'ethereum'];
+    const todayUtcMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const windowStart = new Date(todayUtcMs - 3 * 86400000);
+    const closes = await prisma.dailyClose.findMany({
+      where: { asset: { in: dailyCloseAssets }, date: { gte: windowStart, lt: new Date(todayUtcMs) } },
+      select: { asset: true, date: true, calcMethod: true },
+    });
+    const closeByKey = new Map<string, string>();
+    for (const c of closes) {
+      closeByKey.set(`${c.asset}|${c.date.toISOString().slice(0, 10)}`, c.calcMethod);
+    }
+
+    console.log('\n=== FECHAMENTOS DIÁRIOS (últimos 3 dias) ===');
+    for (const asset of dailyCloseAssets) {
+      for (let i = 1; i <= 3; i++) {
+        const dayIso = new Date(todayUtcMs - i * 86400000).toISOString().slice(0, 10);
+        const method = closeByKey.get(`${asset}|${dayIso}`);
+        if (method === undefined) {
+          console.log(`${asset} ${dayIso}: ausente`);
+          continue;
+        }
+        const kind = classifyDailyCloseMethod(method);
+        const label = kind === 'precise' ? 'preciso' : kind === 'approximate' ? 'aproximado' : 'desconhecido';
+        console.log(`${asset} ${dayIso}: ${label} (${method})`);
+      }
+    }
   } catch (e) {
     console.error('[FATAL]', e instanceof Error ? e.message : String(e).slice(0, 300));
     process.exitCode = 1;
@@ -221,4 +254,8 @@ async function main() {
   }
 }
 
-main();
+const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  main();
+}

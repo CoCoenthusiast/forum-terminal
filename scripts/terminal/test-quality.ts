@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { evaluateMetricQuality, summarizeSource, MetricStatus } from './quality';
+import { evaluateMetricQuality, summarizeSource, classifyDailyCloseMethod, MetricStatus } from './quality';
 
 let failures = 0;
 let passed = 0;
@@ -207,6 +207,154 @@ check('q) mesmo dado com 3 erros SEM isHistorical -> continua failed (regressão
       isHistorical: false,
     });
     return r.status === 'failed';
+  })());
+
+console.log('\n=== TESTES DE classifyDailyCloseMethod ===\n');
+
+check('r1) daily_close_from_history_v1 -> precise',
+  classifyDailyCloseMethod('daily_close_from_history_v1') === 'precise');
+
+check('r2) last_in_60m_window_v1 -> approximate',
+  classifyDailyCloseMethod('last_in_60m_window_v1') === 'approximate');
+
+check('r3) last_snapshot_of_day_v1 -> approximate',
+  classifyDailyCloseMethod('last_snapshot_of_day_v1') === 'approximate');
+
+check('r4) método desconhecido -> unknown',
+  classifyDailyCloseMethod('metodo_inexistente_v0') === 'unknown');
+
+console.log('\n=== TESTES DE frescor histórico por sourceTs (limites 2/2/2/4) ===\n');
+
+check('s1) preço histórico, sourceTs = D-2 (2026-10-08), lag 2 -> fresh',
+  evaluateMetricQuality({
+    ...baseInput,
+    isHistorical: true,
+    historicalMaxLagDays: 2,
+    sourceTs: new Date('2026-10-08T00:00:00Z'),
+    latestCollectedAt: new Date('2026-10-08T00:00:00Z'),
+  }).status === 'fresh');
+
+check('s2) preço histórico, sourceTs = D-3 (2026-10-07), lag 2 -> stale com a data',
+  (() => {
+    const r = evaluateMetricQuality({
+      ...baseInput,
+      isHistorical: true,
+      historicalMaxLagDays: 2,
+      sourceTs: new Date('2026-10-07T00:00:00Z'),
+      latestCollectedAt: new Date('2026-10-07T00:00:00Z'),
+    });
+    return r.status === 'stale' && r.reason.includes('2026-10-07');
+  })());
+
+check('s3) tvl histórico, sourceTs = D-3 (2026-10-07), lag 2 -> stale com a data',
+  (() => {
+    const r = evaluateMetricQuality({
+      ...baseInput,
+      metric: 'tvl_usd',
+      isHistorical: true,
+      historicalMaxLagDays: 2,
+      sourceTs: new Date('2026-10-07T00:00:00Z'),
+      latestCollectedAt: new Date('2026-10-07T00:00:00Z'),
+    });
+    return r.status === 'stale' && r.reason.includes('2026-10-07');
+  })());
+
+check('s4) stablecoin histórico, sourceTs = D-3 (2026-10-07), lag 2 -> stale com a data',
+  (() => {
+    const r = evaluateMetricQuality({
+      ...baseInput,
+      metric: 'stablecoin_supply_usd',
+      isHistorical: true,
+      historicalMaxLagDays: 2,
+      sourceTs: new Date('2026-10-07T00:00:00Z'),
+      latestCollectedAt: new Date('2026-10-07T00:00:00Z'),
+    });
+    return r.status === 'stale' && r.reason.includes('2026-10-07');
+  })());
+
+check('s5) DEX histórico, sourceTs = D-4 (2026-10-06), lag 4 -> fresh',
+  evaluateMetricQuality({
+    ...baseInput,
+    metric: 'dex_volume_daily_usd',
+    isHistorical: true,
+    historicalMaxLagDays: 4,
+    sourceTs: new Date('2026-10-06T00:00:00Z'),
+    latestCollectedAt: new Date('2026-10-06T00:00:00Z'),
+  }).status === 'fresh');
+
+check('s6) DEX histórico, sourceTs = D-5 (2026-10-05), lag 4 -> stale com a data',
+  (() => {
+    const r = evaluateMetricQuality({
+      ...baseInput,
+      metric: 'dex_volume_daily_usd',
+      isHistorical: true,
+      historicalMaxLagDays: 4,
+      sourceTs: new Date('2026-10-05T00:00:00Z'),
+      latestCollectedAt: new Date('2026-10-05T00:00:00Z'),
+    });
+    return r.status === 'stale' && r.reason.includes('2026-10-05');
+  })());
+
+check('s7) borda de horário: sourceTs D-2 23:59:59Z, lag 2 -> fresh (compara só a data UTC)',
+  evaluateMetricQuality({
+    ...baseInput,
+    isHistorical: true,
+    historicalMaxLagDays: 2,
+    sourceTs: new Date('2026-10-08T23:59:59Z'),
+    latestCollectedAt: new Date('2026-10-08T23:59:59Z'),
+  }).status === 'fresh');
+
+check('s8) borda de horário: sourceTs D-3 23:59:59Z, lag 2 -> stale',
+  evaluateMetricQuality({
+    ...baseInput,
+    isHistorical: true,
+    historicalMaxLagDays: 2,
+    sourceTs: new Date('2026-10-07T23:59:59Z'),
+    latestCollectedAt: new Date('2026-10-07T23:59:59Z'),
+  }).status === 'stale');
+
+check('s9) histórico com sourceTs null e campo definido -> fresh sem checar frescor (motivo "carga histórica")',
+  (() => {
+    const r = evaluateMetricQuality({
+      ...baseInput,
+      isHistorical: true,
+      historicalMaxLagDays: 2,
+      sourceTs: null,
+    });
+    return r.status === 'fresh' && r.reason.includes('carga histórica');
+  })());
+
+check('s10) histórico antigo SEM historicalMaxLagDays -> fresh (opt-in desativado)',
+  (() => {
+    const r = evaluateMetricQuality({
+      ...baseInput,
+      isHistorical: true,
+      sourceTs: new Date('2026-10-01T00:00:00Z'),
+      latestCollectedAt: new Date('2026-10-01T00:00:00Z'),
+    });
+    return r.status === 'fresh' && r.reason.includes('carga histórica');
+  })());
+
+check('s11) mesmo dado antigo COM historicalMaxLagDays=2 -> stale (prova do opt-in)',
+  evaluateMetricQuality({
+    ...baseInput,
+    isHistorical: true,
+    historicalMaxLagDays: 2,
+    sourceTs: new Date('2026-10-01T00:00:00Z'),
+    latestCollectedAt: new Date('2026-10-01T00:00:00Z'),
+  }).status === 'stale');
+
+check('s12) valor inválido tem precedência sobre frescor histórico',
+  (() => {
+    const r = evaluateMetricQuality({
+      ...baseInput,
+      latestValue: -10,
+      isHistorical: true,
+      historicalMaxLagDays: 2,
+      sourceTs: new Date('2026-10-01T00:00:00Z'),
+      latestCollectedAt: new Date('2026-10-01T00:00:00Z'),
+    });
+    return r.status === 'unverified' && r.reason.includes('inválido');
   })());
 
 console.log(`\n=== RESULTADO: ${passed} passaram, ${failures} falharam ===`);

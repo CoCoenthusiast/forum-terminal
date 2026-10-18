@@ -132,6 +132,23 @@ export const QUALITY_JUMP_THRESHOLDS = { price: 0.30, tvl_usd: 0.30, stablecoin_
 export const QUALITY_FAILED_LAST_N = 3;
 export const QUALITY_HISTORICAL_SOURCE_SUFFIX = '_history';
 
+export const QUALITY_HISTORICAL_MAX_LAG_DAYS = {
+  price: 2,
+  tvl_usd: 2,
+  stablecoin_supply_usd: 2,
+  dex_volume_daily_usd: 4,
+} as const;
+
+export function getHistoricalMaxLagDays(metric: string): number | null {
+  const value = QUALITY_HISTORICAL_MAX_LAG_DAYS[metric as keyof typeof QUALITY_HISTORICAL_MAX_LAG_DAYS];
+  return value ?? null;
+}
+
+// DUPLICADO: os métodos de fechamento também vivem em persist.ts (CALC_METHOD, HISTORY_CALC_METHOD, APPROX_CALC_METHOD).
+// persist.ts não é alterável por esta tarefa; manter as duas listas em sincronia quando um método novo for adicionado.
+export const QUALITY_DAILY_CLOSE_PRECISE_METHODS = [HISTORY_CALC_METHOD] as const;
+export const QUALITY_DAILY_CLOSE_APPROXIMATE_METHODS = [CALC_METHOD, 'last_snapshot_of_day_v1'] as const;
+
 export interface QualityLogOperationMapEntry {
   source: string;
   metric: string;

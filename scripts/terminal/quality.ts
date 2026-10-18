@@ -1,6 +1,14 @@
-import { QUALITY_EXPECTED_INTERVAL_MIN, QUALITY_STALE_AFTER_FACTOR, QUALITY_DAILY_METRICS, QUALITY_DAILY_MAX_SOURCE_LAG_HOURS, QUALITY_JUMP_THRESHOLDS, QUALITY_FAILED_LAST_N, QUALITY_HISTORICAL_SOURCE_SUFFIX } from './config';
+import { QUALITY_EXPECTED_INTERVAL_MIN, QUALITY_STALE_AFTER_FACTOR, QUALITY_DAILY_METRICS, QUALITY_DAILY_MAX_SOURCE_LAG_HOURS, QUALITY_JUMP_THRESHOLDS, QUALITY_FAILED_LAST_N, QUALITY_HISTORICAL_SOURCE_SUFFIX, QUALITY_DAILY_CLOSE_PRECISE_METHODS, QUALITY_DAILY_CLOSE_APPROXIMATE_METHODS } from './config';
 
 export type MetricStatus = 'failed' | 'stale' | 'unverified' | 'fresh' | 'partial';
+
+export type DailyCloseKind = 'precise' | 'approximate' | 'unknown';
+
+export function classifyDailyCloseMethod(calcMethod: string): DailyCloseKind {
+  if ((QUALITY_DAILY_CLOSE_PRECISE_METHODS as readonly string[]).includes(calcMethod)) return 'precise';
+  if ((QUALITY_DAILY_CLOSE_APPROXIMATE_METHODS as readonly string[]).includes(calcMethod)) return 'approximate';
+  return 'unknown';
+}
 
 export interface QualityInput {
   metric: string;
@@ -14,6 +22,7 @@ export interface QualityInput {
   recentLogs: { status: string; endpoint: string; operation: string }[];
   now: Date;
   isHistorical?: boolean;
+  historicalMaxLagDays?: number | null;
 }
 
 export interface QualityResult {
@@ -57,7 +66,7 @@ function hasJump(metric: string, current: number, previous: number | null): bool
 }
 
 export function evaluateMetricQuality(input: QualityInput): QualityResult {
-  const { metric, scope, source, latestValue, latestCollectedAt, previousValue, sourceTs, recentLogs, now, isHistorical } = input;
+  const { metric, scope, source, latestValue, latestCollectedAt, previousValue, sourceTs, recentLogs, now, isHistorical, historicalMaxLagDays } = input;
 
   const expectedIntervalMin = getExpectedIntervalMinutes(source);
   const staleThresholdMin = expectedIntervalMin * QUALITY_STALE_AFTER_FACTOR;
@@ -91,6 +100,17 @@ export function evaluateMetricQuality(input: QualityInput): QualityResult {
       if (sourceLagHours > QUALITY_DAILY_MAX_SOURCE_LAG_HOURS) {
         return { status: 'stale', reason: `sourceTs ${Math.round(sourceLagHours)}h antes do collectedAt (limite ${QUALITY_DAILY_MAX_SOURCE_LAG_HOURS}h)` };
       }
+    }
+  }
+
+  if (isHistorical && historicalMaxLagDays !== undefined && historicalMaxLagDays !== null && sourceTs) {
+    const sourceDayStartMs = Date.UTC(sourceTs.getUTCFullYear(), sourceTs.getUTCMonth(), sourceTs.getUTCDate());
+    const nowDayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const minAllowedDayStartMs = nowDayStartMs - historicalMaxLagDays * 86400000;
+    if (sourceDayStartMs < minAllowedDayStartMs) {
+      const lastDate = sourceTs.toISOString().slice(0, 10);
+      const limitDate = new Date(minAllowedDayStartMs).toISOString().slice(0, 10);
+      return { status: 'stale', reason: `último dado em ${lastDate} (limite até ${limitDate})` };
     }
   }
 
