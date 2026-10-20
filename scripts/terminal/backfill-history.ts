@@ -2,7 +2,7 @@
 import { pathToFileURL } from 'node:url';
 import type { PrismaClient } from './generated/db/client';
 import { Decimal } from './prisma-types';
-import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, BACKFILL_DEX_METRIC_NAME, BACKFILL_DEX_PROTOCOL_ALL_SLUGS, BACKFILL_DEX_PROTOCOL_PAUSE_MS, BACKFILL_FEES_METRIC_NAME, BACKFILL_FEES_PROTOCOL_SLUGS, BACKFILL_FEES_PROTOCOL_PAUSE_MS, DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX, DEFILLAMA_FEES_PROTOCOL_SUMMARY_PREFIX, buildProtocolScope, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
+import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, BACKFILL_DEX_METRIC_NAME, BACKFILL_DEX_PROTOCOL_ALL_SLUGS, BACKFILL_DEX_PROTOCOL_PAUSE_MS, BACKFILL_FEES_METRIC_NAME, BACKFILL_FEES_PROTOCOL_ALL_SLUGS, BACKFILL_FEES_PROTOCOL_PAUSE_MS, DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX, DEFILLAMA_FEES_PROTOCOL_SUMMARY_PREFIX, buildProtocolScope, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
 import { fetchCoinGeckoHistory, filterAndValidatePricePoints } from './sources/coingecko-history';
 import { fetchDefiLlamaTvl, filterAndValidateTvlPoints, fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, fetchDefiLlamaDexVolume, fetchDefiLlamaDexProtocolVolume, filterAndValidateDexVolumePoints, fetchDefiLlamaFeesProtocolDaily, filterAndValidateFeesPoints, analyzeProtocolDateGaps } from './sources/defillama-history';
 import { upgradeDailyCloses } from './persist';
@@ -290,16 +290,21 @@ async function main() {
           }
         }
 
-        for (let i = 0; i < BACKFILL_FEES_PROTOCOL_SLUGS.length; i++) {
-          const slug = BACKFILL_FEES_PROTOCOL_SLUGS[i];
+        for (let i = 0; i < BACKFILL_FEES_PROTOCOL_ALL_SLUGS.length; i++) {
+          const slug = BACKFILL_FEES_PROTOCOL_ALL_SLUGS[i];
           const feesData = await fetchDefiLlamaFeesProtocolDaily(slug);
           console.log(`fees_daily_usd ${slug}: ${feesData.length} pontos brutos`);
+          const gaps = analyzeProtocolDateGaps(feesData, todayStartMs);
+          const shown = gaps.missingDates.length;
+          const extra = gaps.missingDays > shown ? ` (+${gaps.missingDays - shown} não listados)` : '';
+          console.log(`  buracos: esperados=${gaps.expectedDays}, presentes=${gaps.presentDays}, ausentes=${gaps.missingDays}, ate_D-3=${gaps.missingClosed}, recentes=${gaps.missingRecent}, fora_da_meia_noite=${gaps.offMidnight}`);
+          console.log(`  datas ausentes: [${gaps.missingDates.join(', ')}]${extra}`);
           const feesFiltered = filterAndValidateFeesPoints(feesData, todayStartMs);
           console.log(`  válidos: ${feesFiltered.valid.length}, ignorados: ${feesFiltered.ignored} (${JSON.stringify(feesFiltered.ignoredReasons)}), inválidos: ${feesFiltered.invalid}`);
           if (feesFiltered.valid.length > 0) {
             console.log(`  primeira data: ${feesFiltered.valid[0].collectedAt.toISOString().slice(0, 10)}, última: ${feesFiltered.valid[feesFiltered.valid.length - 1].collectedAt.toISOString().slice(0, 10)}`);
           }
-          if (i < BACKFILL_FEES_PROTOCOL_SLUGS.length - 1) {
+          if (i < BACKFILL_FEES_PROTOCOL_ALL_SLUGS.length - 1) {
             await new Promise(r => setTimeout(r, BACKFILL_FEES_PROTOCOL_PAUSE_MS));
           }
         }
@@ -400,8 +405,8 @@ async function main() {
         }
       }
 
-      for (let i = 0; i < BACKFILL_FEES_PROTOCOL_SLUGS.length; i++) {
-        const slug = BACKFILL_FEES_PROTOCOL_SLUGS[i];
+      for (let i = 0; i < BACKFILL_FEES_PROTOCOL_ALL_SLUGS.length; i++) {
+        const slug = BACKFILL_FEES_PROTOCOL_ALL_SLUGS[i];
         try {
           console.log(`Executando backfill de Fees (${slug})...`);
           const feesRes = await runMetricBackfill(
@@ -423,7 +428,7 @@ async function main() {
         } catch (e) {
           console.error(`  fees_daily_usd (${slug}) falhou:`, e instanceof Error ? e.message : String(e).slice(0, 300));
         }
-        if (i < BACKFILL_FEES_PROTOCOL_SLUGS.length - 1) {
+        if (i < BACKFILL_FEES_PROTOCOL_ALL_SLUGS.length - 1) {
           await new Promise(r => setTimeout(r, BACKFILL_FEES_PROTOCOL_PAUSE_MS));
         }
       }

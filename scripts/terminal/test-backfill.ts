@@ -17,6 +17,8 @@ import {
   BACKFILL_DEX_PROTOCOL_ALL_SLUGS,
   BACKFILL_FEES_METRIC_NAME,
   BACKFILL_FEES_PROTOCOL_SLUGS,
+  BACKFILL_FEES_PROTOCOL_EXTRA_SLUGS,
+  BACKFILL_FEES_PROTOCOL_ALL_SLUGS,
   buildDexProtocolScope,
   buildProtocolScope,
 } from './config';
@@ -318,6 +320,61 @@ check('25) métricas e scope inalterados; lista combinada com 8 slugs',
       && feesMetric === 'fees_daily_usd'
       && buildProtocolScope('raydium-amm') === 'solana:protocol:raydium-amm'
       && buildDexProtocolScope('raydium-amm') === 'solana:protocol:raydium-amm';
+  })());
+
+check('26) allowlist de fees de extensão exata, sem dupla contagem, prop AMM ou orca-dex',
+  (() => {
+    const base: readonly string[] = BACKFILL_FEES_PROTOCOL_SLUGS;
+    const extra: readonly string[] = BACKFILL_FEES_PROTOCOL_EXTRA_SLUGS;
+    const all: readonly string[] = BACKFILL_FEES_PROTOCOL_ALL_SLUGS;
+    const expected = ['raydium-amm', 'meteora-dlmm', 'meteora-damm-v1', 'meteora-damm-v2', 'meteora-dynamic-bonding-curve'];
+    const forbidden = ['bisonfi', 'tessera-v', 'goonfi', 'scorch', 'manifest-trade', 'humidifi', 'solfi-v2', 'zerofi', 'alphaq', 'jupiterz', 'orca-dex', 'axiom', 'fomo-wallet', 'gmgn', 'pump.fun-mobile-app', 'terminal', 'stonkfun', 'bags'];
+    return extra.length === 5
+      && expected.every((slug) => extra.includes(slug))
+      && forbidden.every((slug) => !extra.includes(slug) && !all.includes(slug))
+      && base.length === 3
+      && all.length === 8
+      && new Set(all).size === 8
+      && base.every((slug) => all.includes(slug))
+      && extra.every((slug) => all.includes(slug));
+  })());
+
+check('27) fees: buraco não vira zero e não é interpolado',
+  (() => {
+    const dayMs = 86400000;
+    const d6 = Math.floor((todayStartMs - 6 * dayMs) / 1000);
+    const d4 = Math.floor((todayStartMs - 4 * dayMs) / 1000);
+    const rawPoints: [number, number][] = [[d6, 100], [d4, 300]];
+    const gaps = analyzeProtocolDateGaps(rawPoints, todayStartMs);
+    const r = filterAndValidateFeesPoints(rawPoints, todayStartMs);
+    const missing = '2026-10-06';
+    return gaps.expectedDays === 3
+      && gaps.presentDays === 2
+      && gaps.missingDays === 1
+      && gaps.missingDates.length === 1
+      && gaps.missingDates[0] === missing
+      && gaps.missingClosed === 1
+      && gaps.missingRecent === 0
+      && gaps.offMidnight === 0
+      && r.valid.length === 2
+      && r.valid.every((p) => p.collectedAt.toISOString().slice(0, 10) !== missing && p.value !== 0);
+  })());
+
+check('28) métricas e scopes de fees inalterados; listas combinadas com 8',
+  (() => {
+    const feesBase: readonly string[] = BACKFILL_FEES_PROTOCOL_SLUGS;
+    const feesAll: readonly string[] = BACKFILL_FEES_PROTOCOL_ALL_SLUGS;
+    const dexAll: readonly string[] = BACKFILL_DEX_PROTOCOL_ALL_SLUGS;
+    const feesMetric: string = BACKFILL_FEES_METRIC_NAME;
+    const dexMetric: string = BACKFILL_DEX_METRIC_NAME;
+    return feesBase.length === 3
+      && feesAll.length === 8
+      && dexAll.length === 8
+      && feesMetric !== dexMetric
+      && feesMetric === 'fees_daily_usd'
+      && dexMetric === 'dex_volume_daily_usd'
+      && buildProtocolScope('meteora-dlmm') === 'solana:protocol:meteora-dlmm'
+      && buildDexProtocolScope('meteora-dlmm') === 'solana:protocol:meteora-dlmm';
   })());
 
 console.log(`\n=== RESULTADO: ${passed} passaram, ${failures} falharam ===`);

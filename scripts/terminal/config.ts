@@ -205,6 +205,10 @@ export const DEFILLAMA_FEES_PROTOCOL_DATA_TYPE = 'dailyFees';
 export const BACKFILL_FEES_METRIC_NAME = 'fees_daily_usd';
 export const BACKFILL_FEES_CHART_KEY = 'totalDataChart';
 export const BACKFILL_FEES_PROTOCOL_SLUGS = ['pump.fun', 'pumpswap', 'launchlab'] as const;
+// Extensão do coorte original de fees, sem entradas de dupla contagem, prop AMMs/MMs nem pools fora do escopo.
+export const BACKFILL_FEES_PROTOCOL_EXTRA_SLUGS = ['raydium-amm', 'meteora-dlmm', 'meteora-damm-v1', 'meteora-damm-v2', 'meteora-dynamic-bonding-curve'] as const;
+// Lista usada apenas pelos laços de execução de fees (dry-run e caminho real).
+export const BACKFILL_FEES_PROTOCOL_ALL_SLUGS = [...BACKFILL_FEES_PROTOCOL_SLUGS, ...BACKFILL_FEES_PROTOCOL_EXTRA_SLUGS] as const;
 export const BACKFILL_FEES_PROTOCOL_PAUSE_MS = 1500;
 
 export interface BackfillPricePoint {
