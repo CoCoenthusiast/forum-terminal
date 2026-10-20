@@ -184,11 +184,24 @@ export const BACKFILL_DEX_DAILY_QUARANTINE_DAYS = 2; // os últimos dias da sér
 export const DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX = '/summary/dexs/';
 export const BACKFILL_DEX_PROTOCOL_SLUGS = ['pump.fun', 'pumpswap', 'launchlab'] as const;
 export const BACKFILL_DEX_PROTOCOL_SCOPE_PREFIX = 'solana:protocol:';
+export const BACKFILL_PROTOCOL_SCOPE_PREFIX = BACKFILL_DEX_PROTOCOL_SCOPE_PREFIX;
 export const BACKFILL_DEX_PROTOCOL_PAUSE_MS = 1500;
 
-export function buildDexProtocolScope(slug: string): string {
-  return `${BACKFILL_DEX_PROTOCOL_SCOPE_PREFIX}${slug}`;
+export function buildProtocolScope(slug: string): string {
+  return `${BACKFILL_PROTOCOL_SCOPE_PREFIX}${slug}`;
 }
+
+export const buildDexProtocolScope = buildProtocolScope;
+
+// Allowlist própria do backfill de fees por protocolo. NÃO reutilizar
+// DEFILLAMA_FEES_PROTOCOL_SLUGS: ele contém entradas doublecounted ou
+// fora do escopo e nunca entra nos totais.
+export const DEFILLAMA_FEES_PROTOCOL_SUMMARY_PREFIX = '/summary/fees/';
+export const DEFILLAMA_FEES_PROTOCOL_DATA_TYPE = 'dailyFees';
+export const BACKFILL_FEES_METRIC_NAME = 'fees_daily_usd';
+export const BACKFILL_FEES_CHART_KEY = 'totalDataChart';
+export const BACKFILL_FEES_PROTOCOL_SLUGS = ['pump.fun', 'pumpswap', 'launchlab'] as const;
+export const BACKFILL_FEES_PROTOCOL_PAUSE_MS = 1500;
 
 export interface BackfillPricePoint {
   asset: string;

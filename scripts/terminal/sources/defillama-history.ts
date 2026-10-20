@@ -5,9 +5,13 @@ import {
   DEFILLAMA_STABLECOIN_ENDPOINT,
   DEFILLAMA_DEX_ENDPOINT,
   DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX,
+  DEFILLAMA_FEES_PROTOCOL_SUMMARY_PREFIX,
+  DEFILLAMA_FEES_PROTOCOL_DATA_TYPE,
   BACKFILL_DEX_CHART_KEY,
   BACKFILL_DEX_METRIC_NAME,
   BACKFILL_DEX_DAILY_QUARANTINE_DAYS,
+  BACKFILL_FEES_CHART_KEY,
+  BACKFILL_FEES_METRIC_NAME,
   REQUEST_TIMEOUT_MS,
   type BackfillMetricPoint,
 } from '../config';
@@ -110,9 +114,10 @@ export function filterAndValidateStablecoinPoints(
   return { valid, ignored, invalid, ignoredReasons };
 }
 
-export function filterAndValidateDexVolumePoints(
+function filterAndValidateDailyProtocolPoints(
   rawPoints: [number, number][],
-  todayStartMs: number
+  todayStartMs: number,
+  metricName: string
 ): { valid: BackfillMetricPoint[]; ignored: number; invalid: number; ignoredReasons: Record<string, number> } {
   const valid: BackfillMetricPoint[] = [];
   let ignored = 0;
@@ -140,10 +145,24 @@ export function filterAndValidateDexVolumePoints(
     }
     const collectedAt = new Date(tsMs);
     const sourceTs = new Date(tsMs);
-    valid.push({ metric: BACKFILL_DEX_METRIC_NAME, value: volume, collectedAt, sourceTs });
+    valid.push({ metric: metricName, value: volume, collectedAt, sourceTs });
   }
 
   return { valid, ignored, invalid, ignoredReasons };
+}
+
+export function filterAndValidateDexVolumePoints(
+  rawPoints: [number, number][],
+  todayStartMs: number
+): { valid: BackfillMetricPoint[]; ignored: number; invalid: number; ignoredReasons: Record<string, number> } {
+  return filterAndValidateDailyProtocolPoints(rawPoints, todayStartMs, BACKFILL_DEX_METRIC_NAME);
+}
+
+export function filterAndValidateFeesPoints(
+  rawPoints: [number, number][],
+  todayStartMs: number
+): { valid: BackfillMetricPoint[]; ignored: number; invalid: number; ignoredReasons: Record<string, number> } {
+  return filterAndValidateDailyProtocolPoints(rawPoints, todayStartMs, BACKFILL_FEES_METRIC_NAME);
 }
 
 export async function fetchDefiLlamaTvl(): Promise<{ date: number; tvl: number }[]> {
@@ -173,5 +192,17 @@ export async function fetchDefiLlamaDexProtocolVolume(slug: string): Promise<[nu
   const data = await fetchWithRetry(url);
   const chart = data[BACKFILL_DEX_CHART_KEY];
   if (!Array.isArray(chart)) throw new Error(`Resposta inesperada de summary/dexs/${slug}: ${BACKFILL_DEX_CHART_KEY} não é array`);
+  return chart;
+}
+
+export function buildDefiLlamaFeesProtocolUrl(slug: string): string {
+  return `${DEFILLAMA_BASE_URL}${DEFILLAMA_FEES_PROTOCOL_SUMMARY_PREFIX}${encodeURIComponent(slug)}?dataType=${DEFILLAMA_FEES_PROTOCOL_DATA_TYPE}`;
+}
+
+export async function fetchDefiLlamaFeesProtocolDaily(slug: string): Promise<[number, number][]> {
+  const url = buildDefiLlamaFeesProtocolUrl(slug);
+  const data = await fetchWithRetry(url);
+  const chart = data[BACKFILL_FEES_CHART_KEY];
+  if (!Array.isArray(chart)) throw new Error(`Resposta inesperada de summary/fees/${slug}?dataType=${DEFILLAMA_FEES_PROTOCOL_DATA_TYPE}: ${BACKFILL_FEES_CHART_KEY} não é array`);
   return chart;
 }

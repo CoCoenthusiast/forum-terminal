@@ -2,9 +2,9 @@
 import { pathToFileURL } from 'node:url';
 import type { PrismaClient } from './generated/db/client';
 import { Decimal } from './prisma-types';
-import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, BACKFILL_DEX_METRIC_NAME, BACKFILL_DEX_PROTOCOL_SLUGS, BACKFILL_DEX_PROTOCOL_PAUSE_MS, DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX, buildDexProtocolScope, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
+import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, BACKFILL_DEX_METRIC_NAME, BACKFILL_DEX_PROTOCOL_SLUGS, BACKFILL_DEX_PROTOCOL_PAUSE_MS, BACKFILL_FEES_METRIC_NAME, BACKFILL_FEES_PROTOCOL_SLUGS, BACKFILL_FEES_PROTOCOL_PAUSE_MS, DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX, DEFILLAMA_FEES_PROTOCOL_SUMMARY_PREFIX, buildProtocolScope, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
 import { fetchCoinGeckoHistory, filterAndValidatePricePoints } from './sources/coingecko-history';
-import { fetchDefiLlamaTvl, filterAndValidateTvlPoints, fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, fetchDefiLlamaDexVolume, fetchDefiLlamaDexProtocolVolume, filterAndValidateDexVolumePoints } from './sources/defillama-history';
+import { fetchDefiLlamaTvl, filterAndValidateTvlPoints, fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, fetchDefiLlamaDexVolume, fetchDefiLlamaDexProtocolVolume, filterAndValidateDexVolumePoints, fetchDefiLlamaFeesProtocolDaily, filterAndValidateFeesPoints } from './sources/defillama-history';
 import { upgradeDailyCloses } from './persist';
 
 async function logEndpoint(
@@ -284,6 +284,20 @@ async function main() {
             await new Promise(r => setTimeout(r, BACKFILL_DEX_PROTOCOL_PAUSE_MS));
           }
         }
+
+        for (let i = 0; i < BACKFILL_FEES_PROTOCOL_SLUGS.length; i++) {
+          const slug = BACKFILL_FEES_PROTOCOL_SLUGS[i];
+          const feesData = await fetchDefiLlamaFeesProtocolDaily(slug);
+          console.log(`fees_daily_usd ${slug}: ${feesData.length} pontos brutos`);
+          const feesFiltered = filterAndValidateFeesPoints(feesData, todayStartMs);
+          console.log(`  válidos: ${feesFiltered.valid.length}, ignorados: ${feesFiltered.ignored} (${JSON.stringify(feesFiltered.ignoredReasons)}), inválidos: ${feesFiltered.invalid}`);
+          if (feesFiltered.valid.length > 0) {
+            console.log(`  primeira data: ${feesFiltered.valid[0].collectedAt.toISOString().slice(0, 10)}, última: ${feesFiltered.valid[feesFiltered.valid.length - 1].collectedAt.toISOString().slice(0, 10)}`);
+          }
+          if (i < BACKFILL_FEES_PROTOCOL_SLUGS.length - 1) {
+            await new Promise(r => setTimeout(r, BACKFILL_FEES_PROTOCOL_PAUSE_MS));
+          }
+        }
       }
 
       console.log('[DRY-RUN] OK - simulação concluída sem escrita no banco');
@@ -365,7 +379,7 @@ async function main() {
             filterAndValidateDexVolumePoints,
             todayStartMs,
             {
-              scope: buildDexProtocolScope(slug),
+              scope: buildProtocolScope(slug),
               endpoint: `${DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX}${slug}`,
               operation: `backfill_${BACKFILL_DEX_METRIC_NAME}_${slug}`,
             }
@@ -378,6 +392,34 @@ async function main() {
         }
         if (i < BACKFILL_DEX_PROTOCOL_SLUGS.length - 1) {
           await new Promise(r => setTimeout(r, BACKFILL_DEX_PROTOCOL_PAUSE_MS));
+        }
+      }
+
+      for (let i = 0; i < BACKFILL_FEES_PROTOCOL_SLUGS.length; i++) {
+        const slug = BACKFILL_FEES_PROTOCOL_SLUGS[i];
+        try {
+          console.log(`Executando backfill de Fees (${slug})...`);
+          const feesRes = await runMetricBackfill(
+            prisma,
+            llamaSourceId,
+            BACKFILL_FEES_METRIC_NAME,
+            () => fetchDefiLlamaFeesProtocolDaily(slug),
+            filterAndValidateFeesPoints,
+            todayStartMs,
+            {
+              scope: buildProtocolScope(slug),
+              endpoint: `${DEFILLAMA_FEES_PROTOCOL_SUMMARY_PREFIX}${slug}?dataType=dailyFees`,
+              operation: `backfill_${BACKFILL_FEES_METRIC_NAME}_${slug}`,
+            }
+          );
+          results.push(feesRes);
+          if (feesRes.inserted > 0 || feesRes.ignored > 0 || feesRes.invalid > 0) allFailed = false;
+          console.log(`  ${feesRes.name}: recebidos=${feesRes.received}, ignorados=${feesRes.ignored}, inválidos=${feesRes.invalid}, inseridos=${feesRes.inserted}, primeiro=${feesRes.firstDate}, último=${feesRes.lastDate}`);
+        } catch (e) {
+          console.error(`  fees_daily_usd (${slug}) falhou:`, e instanceof Error ? e.message : String(e).slice(0, 300));
+        }
+        if (i < BACKFILL_FEES_PROTOCOL_SLUGS.length - 1) {
+          await new Promise(r => setTimeout(r, BACKFILL_FEES_PROTOCOL_PAUSE_MS));
         }
       }
     }
