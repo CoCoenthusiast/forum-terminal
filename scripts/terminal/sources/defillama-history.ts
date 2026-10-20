@@ -4,6 +4,7 @@ import {
   DEFILLAMA_TVL_ENDPOINT,
   DEFILLAMA_STABLECOIN_ENDPOINT,
   DEFILLAMA_DEX_ENDPOINT,
+  DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX,
   BACKFILL_DEX_CHART_KEY,
   BACKFILL_DEX_METRIC_NAME,
   BACKFILL_DEX_DAILY_QUARANTINE_DAYS,
@@ -164,5 +165,13 @@ export async function fetchDefiLlamaDexVolume(): Promise<[number, number][]> {
   const data = await fetchWithRetry(url);
   const chart = data[BACKFILL_DEX_CHART_KEY];
   if (!Array.isArray(chart)) throw new Error(`Resposta inesperada de overview/dexs/Solana: ${BACKFILL_DEX_CHART_KEY} não é array`);
+  return chart;
+}
+
+export async function fetchDefiLlamaDexProtocolVolume(slug: string): Promise<[number, number][]> {
+  const url = `${DEFILLAMA_BASE_URL}${DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX}${encodeURIComponent(slug)}`;
+  const data = await fetchWithRetry(url);
+  const chart = data[BACKFILL_DEX_CHART_KEY];
+  if (!Array.isArray(chart)) throw new Error(`Resposta inesperada de summary/dexs/${slug}: ${BACKFILL_DEX_CHART_KEY} não é array`);
   return chart;
 }

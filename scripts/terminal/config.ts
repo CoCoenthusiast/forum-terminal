@@ -178,6 +178,18 @@ export const BACKFILL_DEX_METRIC_NAME = 'dex_volume_daily_usd';
 export const BACKFILL_DEX_CHART_KEY = 'totalDataChart';
 export const BACKFILL_DEX_DAILY_QUARANTINE_DAYS = 2; // os últimos dias da série de volume DEX são revistos pela fonte; skipDuplicates não corrige valores já gravados
 
+// Allowlist própria do backfill por protocolo. NÃO reutilizar
+// DEFILLAMA_DEX_PROTOCOL_SLUGS: stonkfun e pump.fun-mobile-app são
+// doublecounted e nunca entram nos totais.
+export const DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX = '/summary/dexs/';
+export const BACKFILL_DEX_PROTOCOL_SLUGS = ['pump.fun', 'pumpswap', 'launchlab'] as const;
+export const BACKFILL_DEX_PROTOCOL_SCOPE_PREFIX = 'solana:protocol:';
+export const BACKFILL_DEX_PROTOCOL_PAUSE_MS = 1500;
+
+export function buildDexProtocolScope(slug: string): string {
+  return `${BACKFILL_DEX_PROTOCOL_SCOPE_PREFIX}${slug}`;
+}
+
 export interface BackfillPricePoint {
   asset: string;
   priceUsd: number;

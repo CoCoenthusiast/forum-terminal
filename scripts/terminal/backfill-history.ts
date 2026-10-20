@@ -2,9 +2,9 @@
 import { pathToFileURL } from 'node:url';
 import type { PrismaClient } from './generated/db/client';
 import { Decimal } from './prisma-types';
-import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
+import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, BACKFILL_DEX_METRIC_NAME, BACKFILL_DEX_PROTOCOL_SLUGS, BACKFILL_DEX_PROTOCOL_PAUSE_MS, DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX, buildDexProtocolScope, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
 import { fetchCoinGeckoHistory, filterAndValidatePricePoints } from './sources/coingecko-history';
-import { fetchDefiLlamaTvl, filterAndValidateTvlPoints, fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, fetchDefiLlamaDexVolume, filterAndValidateDexVolumePoints } from './sources/defillama-history';
+import { fetchDefiLlamaTvl, filterAndValidateTvlPoints, fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, fetchDefiLlamaDexVolume, fetchDefiLlamaDexProtocolVolume, filterAndValidateDexVolumePoints } from './sources/defillama-history';
 import { upgradeDailyCloses } from './persist';
 
 async function logEndpoint(
@@ -110,12 +110,14 @@ async function runMetricBackfill(
   metric: string,
   fetchFn: () => Promise<any>,
   filterFn: (data: any, todayStartMs: number) => { valid: BackfillMetricPoint[]; ignored: number; invalid: number; ignoredReasons: Record<string, number> },
-  todayStartMs: number
+  todayStartMs: number,
+  options?: { scope?: string; endpoint?: string; operation?: string }
 ): Promise<BackfillSeriesResult> {
-  const operation = `backfill_${metric}`;
-  const endpoint = metric === 'tvl_usd' ? '/v2/historicalChainTvl/Solana'
+  const operation = options?.operation ?? `backfill_${metric}`;
+  const endpoint = options?.endpoint ?? (metric === 'tvl_usd' ? '/v2/historicalChainTvl/Solana'
     : metric === 'stablecoin_supply_usd' ? '/stablecoincharts/Solana'
-    : '/overview/dexs/Solana';
+    : '/overview/dexs/Solana');
+  const scope = options?.scope ?? 'solana';
   let received = 0, ignored = 0, invalid = 0, inserted = 0;
   let firstDate: string | null = null, lastDate: string | null = null;
   const ignoredReasons: Record<string, number> = {};
@@ -141,7 +143,7 @@ async function runMetricBackfill(
         const res = await prisma.metricSnapshot.createMany({
           data: batch.map(p => ({
             sourceId: llamaSourceId,
-            scope: 'solana',
+            scope,
             metric: p.metric,
             value: new Decimal(String(p.value)),
             unit: 'USD',
@@ -268,6 +270,20 @@ async function main() {
         console.log(`dex_volume_daily_usd: ${dexData.length} pontos brutos`);
         const dexFiltered = filterAndValidateDexVolumePoints(dexData, todayStartMs);
         console.log(`  válidos: ${dexFiltered.valid.length}, ignorados: ${dexFiltered.ignored} (${JSON.stringify(dexFiltered.ignoredReasons)}), inválidos: ${dexFiltered.invalid}`);
+
+        for (let i = 0; i < BACKFILL_DEX_PROTOCOL_SLUGS.length; i++) {
+          const slug = BACKFILL_DEX_PROTOCOL_SLUGS[i];
+          const protocolData = await fetchDefiLlamaDexProtocolVolume(slug);
+          console.log(`dex_volume_daily_usd ${slug}: ${protocolData.length} pontos brutos`);
+          const protocolFiltered = filterAndValidateDexVolumePoints(protocolData, todayStartMs);
+          console.log(`  válidos: ${protocolFiltered.valid.length}, ignorados: ${protocolFiltered.ignored} (${JSON.stringify(protocolFiltered.ignoredReasons)}), inválidos: ${protocolFiltered.invalid}`);
+          if (protocolFiltered.valid.length > 0) {
+            console.log(`  primeira data: ${protocolFiltered.valid[0].collectedAt.toISOString().slice(0, 10)}, última: ${protocolFiltered.valid[protocolFiltered.valid.length - 1].collectedAt.toISOString().slice(0, 10)}`);
+          }
+          if (i < BACKFILL_DEX_PROTOCOL_SLUGS.length - 1) {
+            await new Promise(r => setTimeout(r, BACKFILL_DEX_PROTOCOL_PAUSE_MS));
+          }
+        }
       }
 
       console.log('[DRY-RUN] OK - simulação concluída sem escrita no banco');
@@ -335,6 +351,34 @@ async function main() {
         console.log(`  ${dexRes.name}: recebidos=${dexRes.received}, ignorados=${dexRes.ignored}, inválidos=${dexRes.invalid}, inseridos=${dexRes.inserted}, primeiro=${dexRes.firstDate}, último=${dexRes.lastDate}`);
       } catch (e) {
         console.error('  dex_volume_daily_usd falhou:', e instanceof Error ? e.message : String(e).slice(0, 300));
+      }
+
+      for (let i = 0; i < BACKFILL_DEX_PROTOCOL_SLUGS.length; i++) {
+        const slug = BACKFILL_DEX_PROTOCOL_SLUGS[i];
+        try {
+          console.log(`Executando backfill de DEX Volume (${slug})...`);
+          const protocolRes = await runMetricBackfill(
+            prisma,
+            llamaSourceId,
+            BACKFILL_DEX_METRIC_NAME,
+            () => fetchDefiLlamaDexProtocolVolume(slug),
+            filterAndValidateDexVolumePoints,
+            todayStartMs,
+            {
+              scope: buildDexProtocolScope(slug),
+              endpoint: `${DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX}${slug}`,
+              operation: `backfill_${BACKFILL_DEX_METRIC_NAME}_${slug}`,
+            }
+          );
+          results.push(protocolRes);
+          if (protocolRes.inserted > 0 || protocolRes.ignored > 0 || protocolRes.invalid > 0) allFailed = false;
+          console.log(`  ${protocolRes.name}: recebidos=${protocolRes.received}, ignorados=${protocolRes.ignored}, inválidos=${protocolRes.invalid}, inseridos=${protocolRes.inserted}, primeiro=${protocolRes.firstDate}, último=${protocolRes.lastDate}`);
+        } catch (e) {
+          console.error(`  dex_volume_daily_usd (${slug}) falhou:`, e instanceof Error ? e.message : String(e).slice(0, 300));
+        }
+        if (i < BACKFILL_DEX_PROTOCOL_SLUGS.length - 1) {
+          await new Promise(r => setTimeout(r, BACKFILL_DEX_PROTOCOL_PAUSE_MS));
+        }
       }
     }
 

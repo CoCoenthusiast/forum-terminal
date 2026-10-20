@@ -7,6 +7,11 @@ import {
   filterAndValidateStablecoinPoints,
   filterAndValidateDexVolumePoints,
 } from './sources/defillama-history';
+import {
+  BACKFILL_DEX_METRIC_NAME,
+  BACKFILL_DEX_PROTOCOL_SLUGS,
+  buildDexProtocolScope,
+} from './config';
 
 const now = new Date('2026-10-11T12:00:00Z');
 const todayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
@@ -118,6 +123,59 @@ check('12) série de TVL: ponto de hoje menos 1 dia -> aceito (sem quarentena)',
     const rawPoints = [{ date: Math.floor(yesterdayStartMs / 1000), tvl: 1000000 }];
     const r = filterAndValidateTvlPoints(rawPoints, todayStartMs);
     return r.valid.length === 1 && r.ignored === 0 && r.invalid === 0;
+  })());
+
+console.log('\n=== TESTES DO BACKFILL DEX POR PROTOCOLO ===\n');
+
+check('13) DEX protocolo: D-5, D-2, D-1, hoje e amanhã -> só D-5 válido',
+  (() => {
+    const dayMs = 86400000;
+    const rawPoints: [number, number][] = [
+      [Math.floor((todayStartMs - 5 * dayMs) / 1000), 500],
+      [Math.floor((todayStartMs - 2 * dayMs) / 1000), 200],
+      [Math.floor((todayStartMs - 1 * dayMs) / 1000), 100],
+      [Math.floor(todayStartMs / 1000), 50],
+      [Math.floor((todayStartMs + dayMs) / 1000), 10],
+    ];
+    const r = filterAndValidateDexVolumePoints(rawPoints, todayStartMs);
+    return r.valid.length === 1
+      && r.valid[0].value === 500
+      && r.ignored === 4
+      && r.ignoredReasons.not_closed_day === 2
+      && r.ignoredReasons.quarantine_recent_days === 2
+      && r.invalid === 0;
+  })());
+
+check('14) DEX protocolo: 0 válido; -1 e NaN inválidos',
+  (() => {
+    const dayMs = 86400000;
+    const base = Math.floor((todayStartMs - 5 * dayMs) / 1000);
+    const rawPoints: [number, number][] = [[base, 0], [base, -1], [base, NaN]];
+    const r = filterAndValidateDexVolumePoints(rawPoints, todayStartMs);
+    return r.valid.length === 1 && r.valid[0].value === 0 && r.invalid === 2 && r.ignored === 0;
+  })());
+
+check('15) allowlist DEX tem exatamente os 3 slugs e exclui dupla contagem',
+  (() => {
+    const slugs: readonly string[] = BACKFILL_DEX_PROTOCOL_SLUGS;
+    return slugs.length === 3
+      && slugs.includes('pump.fun')
+      && slugs.includes('pumpswap')
+      && slugs.includes('launchlab')
+      && !slugs.includes('stonkfun')
+      && !slugs.includes('pump.fun-mobile-app');
+  })());
+
+check('16) scope e métrica do protocolo montados corretamente',
+  (() => {
+    const scopesOk = BACKFILL_DEX_PROTOCOL_SLUGS.every((slug) => buildDexProtocolScope(slug) === `solana:protocol:${slug}`);
+    const dayMs = 86400000;
+    const rawPoints: [number, number][] = [[Math.floor((todayStartMs - 5 * dayMs) / 1000), 123]];
+    const r = filterAndValidateDexVolumePoints(rawPoints, todayStartMs);
+    return scopesOk
+      && BACKFILL_DEX_METRIC_NAME === 'dex_volume_daily_usd'
+      && r.valid.length === 1
+      && r.valid[0].metric === BACKFILL_DEX_METRIC_NAME;
   })());
 
 console.log(`\n=== RESULTADO: ${passed} passaram, ${failures} falharam ===`);
