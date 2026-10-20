@@ -165,6 +165,69 @@ export function filterAndValidateFeesPoints(
   return filterAndValidateDailyProtocolPoints(rawPoints, todayStartMs, BACKFILL_FEES_METRIC_NAME);
 }
 
+export interface ProtocolDateGapAnalysis {
+  firstDate: string | null;
+  lastDate: string | null;
+  expectedDays: number;
+  presentDays: number;
+  missingDays: number;
+  missingDates: string[];
+  missingClosed: number;
+  missingRecent: number;
+  offMidnight: number;
+}
+
+export function analyzeProtocolDateGaps(
+  rawPoints: [number, number][],
+  todayStartMs: number,
+  maxMissingDates = 20
+): ProtocolDateGapAnalysis {
+  const dayMs = 86400000;
+  let offMidnight = 0;
+  const days = new Set<number>();
+
+  for (const [tsSec] of rawPoints) {
+    if (tsSec % 86400 !== 0) offMidnight++;
+    days.add(Math.floor((tsSec * 1000) / dayMs) * dayMs);
+  }
+
+  if (days.size === 0) {
+    return { firstDate: null, lastDate: null, expectedDays: 0, presentDays: 0, missingDays: 0, missingDates: [], missingClosed: 0, missingRecent: 0, offMidnight };
+  }
+
+  const sorted = [...days].sort((a, b) => a - b);
+  const firstDay = sorted[0];
+  const lastDay = sorted[sorted.length - 1];
+  const expectedDays = (lastDay - firstDay) / dayMs + 1;
+  const presentDays = days.size;
+  const missingDays = expectedDays - presentDays;
+  const closedCutoff = todayStartMs - 3 * dayMs;
+  let missingClosed = 0;
+  let missingRecent = 0;
+  const missingDates: string[] = [];
+
+  for (let day = firstDay; day <= lastDay; day += dayMs) {
+    if (days.has(day)) continue;
+    if (day <= closedCutoff) missingClosed++;
+    else missingRecent++;
+    if (missingDates.length < maxMissingDates) {
+      missingDates.push(new Date(day).toISOString().slice(0, 10));
+    }
+  }
+
+  return {
+    firstDate: new Date(firstDay).toISOString().slice(0, 10),
+    lastDate: new Date(lastDay).toISOString().slice(0, 10),
+    expectedDays,
+    presentDays,
+    missingDays,
+    missingDates,
+    missingClosed,
+    missingRecent,
+    offMidnight,
+  };
+}
+
 export async function fetchDefiLlamaTvl(): Promise<{ date: number; tvl: number }[]> {
   const url = `${DEFILLAMA_BASE_URL}${DEFILLAMA_TVL_ENDPOINT}`;
   const data = await fetchWithRetry(url);

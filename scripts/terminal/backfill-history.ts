@@ -2,9 +2,9 @@
 import { pathToFileURL } from 'node:url';
 import type { PrismaClient } from './generated/db/client';
 import { Decimal } from './prisma-types';
-import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, BACKFILL_DEX_METRIC_NAME, BACKFILL_DEX_PROTOCOL_SLUGS, BACKFILL_DEX_PROTOCOL_PAUSE_MS, BACKFILL_FEES_METRIC_NAME, BACKFILL_FEES_PROTOCOL_SLUGS, BACKFILL_FEES_PROTOCOL_PAUSE_MS, DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX, DEFILLAMA_FEES_PROTOCOL_SUMMARY_PREFIX, buildProtocolScope, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
+import { checkEnvironment, BACKFILL_CG_DAYS, DAILY_CLOSE_BACKFILL_CG_DAYS, BACKFILL_CG_ASSETS, BACKFILL_CG_PAUSE_MS, BACKFILL_DEX_METRIC_NAME, BACKFILL_DEX_PROTOCOL_ALL_SLUGS, BACKFILL_DEX_PROTOCOL_PAUSE_MS, BACKFILL_FEES_METRIC_NAME, BACKFILL_FEES_PROTOCOL_SLUGS, BACKFILL_FEES_PROTOCOL_PAUSE_MS, DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX, DEFILLAMA_FEES_PROTOCOL_SUMMARY_PREFIX, buildProtocolScope, type BackfillSeriesResult, type BackfillPricePoint, type BackfillMetricPoint } from './config';
 import { fetchCoinGeckoHistory, filterAndValidatePricePoints } from './sources/coingecko-history';
-import { fetchDefiLlamaTvl, filterAndValidateTvlPoints, fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, fetchDefiLlamaDexVolume, fetchDefiLlamaDexProtocolVolume, filterAndValidateDexVolumePoints, fetchDefiLlamaFeesProtocolDaily, filterAndValidateFeesPoints } from './sources/defillama-history';
+import { fetchDefiLlamaTvl, filterAndValidateTvlPoints, fetchDefiLlamaStablecoins, filterAndValidateStablecoinPoints, fetchDefiLlamaDexVolume, fetchDefiLlamaDexProtocolVolume, filterAndValidateDexVolumePoints, fetchDefiLlamaFeesProtocolDaily, filterAndValidateFeesPoints, analyzeProtocolDateGaps } from './sources/defillama-history';
 import { upgradeDailyCloses } from './persist';
 
 async function logEndpoint(
@@ -271,16 +271,21 @@ async function main() {
         const dexFiltered = filterAndValidateDexVolumePoints(dexData, todayStartMs);
         console.log(`  válidos: ${dexFiltered.valid.length}, ignorados: ${dexFiltered.ignored} (${JSON.stringify(dexFiltered.ignoredReasons)}), inválidos: ${dexFiltered.invalid}`);
 
-        for (let i = 0; i < BACKFILL_DEX_PROTOCOL_SLUGS.length; i++) {
-          const slug = BACKFILL_DEX_PROTOCOL_SLUGS[i];
+        for (let i = 0; i < BACKFILL_DEX_PROTOCOL_ALL_SLUGS.length; i++) {
+          const slug = BACKFILL_DEX_PROTOCOL_ALL_SLUGS[i];
           const protocolData = await fetchDefiLlamaDexProtocolVolume(slug);
           console.log(`dex_volume_daily_usd ${slug}: ${protocolData.length} pontos brutos`);
+          const gaps = analyzeProtocolDateGaps(protocolData, todayStartMs);
+          const shown = gaps.missingDates.length;
+          const extra = gaps.missingDays > shown ? ` (+${gaps.missingDays - shown} não listados)` : '';
+          console.log(`  buracos: esperados=${gaps.expectedDays}, presentes=${gaps.presentDays}, ausentes=${gaps.missingDays}, ate_D-3=${gaps.missingClosed}, recentes=${gaps.missingRecent}, fora_da_meia_noite=${gaps.offMidnight}`);
+          console.log(`  datas ausentes: [${gaps.missingDates.join(', ')}]${extra}`);
           const protocolFiltered = filterAndValidateDexVolumePoints(protocolData, todayStartMs);
           console.log(`  válidos: ${protocolFiltered.valid.length}, ignorados: ${protocolFiltered.ignored} (${JSON.stringify(protocolFiltered.ignoredReasons)}), inválidos: ${protocolFiltered.invalid}`);
           if (protocolFiltered.valid.length > 0) {
             console.log(`  primeira data: ${protocolFiltered.valid[0].collectedAt.toISOString().slice(0, 10)}, última: ${protocolFiltered.valid[protocolFiltered.valid.length - 1].collectedAt.toISOString().slice(0, 10)}`);
           }
-          if (i < BACKFILL_DEX_PROTOCOL_SLUGS.length - 1) {
+          if (i < BACKFILL_DEX_PROTOCOL_ALL_SLUGS.length - 1) {
             await new Promise(r => setTimeout(r, BACKFILL_DEX_PROTOCOL_PAUSE_MS));
           }
         }
@@ -367,8 +372,8 @@ async function main() {
         console.error('  dex_volume_daily_usd falhou:', e instanceof Error ? e.message : String(e).slice(0, 300));
       }
 
-      for (let i = 0; i < BACKFILL_DEX_PROTOCOL_SLUGS.length; i++) {
-        const slug = BACKFILL_DEX_PROTOCOL_SLUGS[i];
+      for (let i = 0; i < BACKFILL_DEX_PROTOCOL_ALL_SLUGS.length; i++) {
+        const slug = BACKFILL_DEX_PROTOCOL_ALL_SLUGS[i];
         try {
           console.log(`Executando backfill de DEX Volume (${slug})...`);
           const protocolRes = await runMetricBackfill(
@@ -390,7 +395,7 @@ async function main() {
         } catch (e) {
           console.error(`  dex_volume_daily_usd (${slug}) falhou:`, e instanceof Error ? e.message : String(e).slice(0, 300));
         }
-        if (i < BACKFILL_DEX_PROTOCOL_SLUGS.length - 1) {
+        if (i < BACKFILL_DEX_PROTOCOL_ALL_SLUGS.length - 1) {
           await new Promise(r => setTimeout(r, BACKFILL_DEX_PROTOCOL_PAUSE_MS));
         }
       }

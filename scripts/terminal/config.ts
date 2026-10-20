@@ -183,6 +183,10 @@ export const BACKFILL_DEX_DAILY_QUARANTINE_DAYS = 2; // os últimos dias da sér
 // doublecounted e nunca entram nos totais.
 export const DEFILLAMA_DEX_PROTOCOL_SUMMARY_PREFIX = '/summary/dexs/';
 export const BACKFILL_DEX_PROTOCOL_SLUGS = ['pump.fun', 'pumpswap', 'launchlab'] as const;
+// Extensão do coorte original, sem entradas de dupla contagem, prop AMMs/MMs nem pools fora do escopo.
+export const BACKFILL_DEX_PROTOCOL_EXTRA_SLUGS = ['raydium-amm', 'meteora-dlmm', 'meteora-damm-v1', 'meteora-damm-v2', 'meteora-dynamic-bonding-curve'] as const;
+// Lista usada apenas pelos laços de execução (dry-run e caminho real).
+export const BACKFILL_DEX_PROTOCOL_ALL_SLUGS = [...BACKFILL_DEX_PROTOCOL_SLUGS, ...BACKFILL_DEX_PROTOCOL_EXTRA_SLUGS] as const;
 export const BACKFILL_DEX_PROTOCOL_SCOPE_PREFIX = 'solana:protocol:';
 export const BACKFILL_PROTOCOL_SCOPE_PREFIX = BACKFILL_DEX_PROTOCOL_SCOPE_PREFIX;
 export const BACKFILL_DEX_PROTOCOL_PAUSE_MS = 1500;

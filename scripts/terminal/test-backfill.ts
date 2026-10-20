@@ -8,10 +8,13 @@ import {
   filterAndValidateDexVolumePoints,
   filterAndValidateFeesPoints,
   buildDefiLlamaFeesProtocolUrl,
+  analyzeProtocolDateGaps,
 } from './sources/defillama-history';
 import {
   BACKFILL_DEX_METRIC_NAME,
   BACKFILL_DEX_PROTOCOL_SLUGS,
+  BACKFILL_DEX_PROTOCOL_EXTRA_SLUGS,
+  BACKFILL_DEX_PROTOCOL_ALL_SLUGS,
   BACKFILL_FEES_METRIC_NAME,
   BACKFILL_FEES_PROTOCOL_SLUGS,
   buildDexProtocolScope,
@@ -244,6 +247,77 @@ check('21) URL de fees inclui o slug e dataType=dailyFees explícito',
   (() => {
     const expected = 'https://api.llama.fi/summary/fees/pump.fun?dataType=dailyFees';
     return buildDefiLlamaFeesProtocolUrl('pump.fun') === expected;
+  })());
+
+check('22) allowlist de extensão exata, sem dupla contagem, prop AMM ou orca-dex',
+  (() => {
+    const base: readonly string[] = BACKFILL_DEX_PROTOCOL_SLUGS;
+    const extra: readonly string[] = BACKFILL_DEX_PROTOCOL_EXTRA_SLUGS;
+    const all: readonly string[] = BACKFILL_DEX_PROTOCOL_ALL_SLUGS;
+    const expected = ['raydium-amm', 'meteora-dlmm', 'meteora-damm-v1', 'meteora-damm-v2', 'meteora-dynamic-bonding-curve'];
+    const forbidden = ['bisonfi', 'tessera-v', 'goonfi', 'scorch', 'manifest-trade', 'humidifi', 'solfi-v2', 'zerofi', 'alphaq', 'jupiterz', 'orca-dex', 'axiom', 'fomo-wallet', 'gmgn', 'pump.fun-mobile-app', 'terminal', 'stonkfun', 'bags'];
+    return extra.length === 5
+      && expected.every((slug) => extra.includes(slug))
+      && forbidden.every((slug) => !extra.includes(slug) && !all.includes(slug))
+      && base.length === 3
+      && all.length === 8
+      && new Set(all).size === 8
+      && base.every((slug) => all.includes(slug))
+      && extra.every((slug) => all.includes(slug));
+  })());
+
+check('23) buraco: dia ausente não vira zero e não é interpolado',
+  (() => {
+    const dayMs = 86400000;
+    const d6 = Math.floor((todayStartMs - 6 * dayMs) / 1000);
+    const d4 = Math.floor((todayStartMs - 4 * dayMs) / 1000);
+    const rawPoints: [number, number][] = [[d6, 100], [d4, 300]];
+    const gaps = analyzeProtocolDateGaps(rawPoints, todayStartMs);
+    const r = filterAndValidateDexVolumePoints(rawPoints, todayStartMs);
+    const missing = '2026-10-06';
+    return gaps.expectedDays === 3
+      && gaps.presentDays === 2
+      && gaps.missingDays === 1
+      && gaps.missingDates.length === 1
+      && gaps.missingDates[0] === missing
+      && gaps.missingClosed === 1
+      && gaps.missingRecent === 0
+      && gaps.offMidnight === 0
+      && r.valid.length === 2
+      && r.valid.every((p) => p.collectedAt.toISOString().slice(0, 10) !== missing && p.value !== 0);
+  })());
+
+check('24) lista de datas ausentes truncada em 20',
+  (() => {
+    const dayMs = 86400000;
+    const first = Math.floor((todayStartMs - 30 * dayMs) / 1000);
+    const middle = Math.floor((todayStartMs - 20 * dayMs) / 1000);
+    const last = Math.floor((todayStartMs - 5 * dayMs) / 1000);
+    const rawPoints: [number, number][] = [[first, 1], [middle, 2], [last, 3]];
+    const gaps = analyzeProtocolDateGaps(rawPoints, todayStartMs);
+    return gaps.expectedDays === 26
+      && gaps.presentDays === 3
+      && gaps.missingDays === 23
+      && gaps.missingDates.length === 20
+      && gaps.missingClosed === 23
+      && gaps.missingRecent === 0;
+  })());
+
+check('25) métricas e scope inalterados; lista combinada com 8 slugs',
+  (() => {
+    const base: readonly string[] = BACKFILL_DEX_PROTOCOL_SLUGS;
+    const all: readonly string[] = BACKFILL_DEX_PROTOCOL_ALL_SLUGS;
+    const fees: readonly string[] = BACKFILL_FEES_PROTOCOL_SLUGS;
+    const dexMetric: string = BACKFILL_DEX_METRIC_NAME;
+    const feesMetric: string = BACKFILL_FEES_METRIC_NAME;
+    return all.length === 8
+      && base.length === 3
+      && fees.length === 3
+      && dexMetric !== feesMetric
+      && dexMetric === 'dex_volume_daily_usd'
+      && feesMetric === 'fees_daily_usd'
+      && buildProtocolScope('raydium-amm') === 'solana:protocol:raydium-amm'
+      && buildDexProtocolScope('raydium-amm') === 'solana:protocol:raydium-amm';
   })());
 
 console.log(`\n=== RESULTADO: ${passed} passaram, ${failures} falharam ===`);
