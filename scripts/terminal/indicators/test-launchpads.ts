@@ -169,7 +169,7 @@ function runPureSection(): void {
   check('fees/volume: 210/700 = 0.3', ratioRow?.status === 'ok' && approx(value(ratioRow), 0.3), `value=${value(ratioRow)}`);
 
   const zeroVolumeMap: SeriesMap = {
-    [pumpFees]: points([null, null, null, 30, 30, 30, 30, 30, 30, 30]),
+    [pumpFees]: points([null, null, null, 0, 0, 0, 0, 0, 0, 0]),
     [pumpDex]: points([null, null, null, 0, 0, 0, 0, 0, 0, 0]),
   };
   const zeroVolumeRow = findRow(
@@ -228,7 +228,124 @@ function runPureSection(): void {
   check('asOf próprio + dedupe: 1 linha', lagVs.length === 1, `rows=${lagVs.length}`);
   check('asOf próprio: usa D(17), não o dia pedido', lagVs[0] !== undefined && iso(lagVs[0]) === D(17));
 
-  // 8) cohort inteiro sem dados: nenhuma linha (não congela insufficient_history).
+  // 8) volume 0 com fees > 0 na mesma data vira AUSENTE (hipótese de dado faltante).
+  // D(4) = 0 com fees 500; janela D(4)..D(10) fica com 6 pontos válidos de 100.
+  const suspectMap: SeriesMap = {
+    [pumpDex]: points([100, 100, 100, 0, 100, 100, 100, 100, 100, 100]),
+    [pumpFees]: points([null, null, null, 500, null, null, null, null, null, null]),
+  };
+  const suspectVs = findRow(
+    computeLaunchpadIndicatorRows(suspectMap, [asOf(D(10))]),
+    'launchpad_dex_volume_vs_mean_7d',
+    'pump.fun',
+    D(10)
+  );
+  check('suspeito: status ok', suspectVs?.status === 'ok', JSON.stringify(suspectVs?.status));
+  check('suspeito: value = 0 (média dos 6 válidos)', approx(value(suspectVs), 0), `value=${value(suspectVs)}`);
+  check('suspeito: inputCount = 6 (D(4) excluído)', suspectVs?.inputCount === 6, `inputCount=${suspectVs?.inputCount}`);
+  check('suspeito: from = D(4) (início da janela)', suspectVs?.fromDate?.toISOString().slice(0, 10) === D(4));
+  const pumpDisplayId = LAUNCHPAD_SERIES_IDS['pump.fun'].dexInput;
+  const displayPoint = suspectMap[pumpDisplayId]?.find((p) => p.date === D(4));
+  check(
+    'suspeito: input mostra o ponto excluído e o motivo',
+    String(displayPoint?.value) === 'EXCLUIDO(volume=0,fees=500)',
+    String(displayPoint?.value)
+  );
+  check(
+    'suspeito: série bruta permanece 0',
+    suspectMap[pumpDex]?.find((p) => p.date === D(4))?.value === 0
+  );
+
+  // 9) volume 0 com fees 0 continua zero real.
+  const zeroFeesMap: SeriesMap = {
+    [pumpDex]: points([100, 100, 100, 100, 100, 100, 100, 100, 100, 0]),
+    [pumpFees]: points([null, null, null, null, null, null, null, null, null, 0]),
+  };
+  const zeroFeesRow = findRow(
+    computeLaunchpadIndicatorRows(zeroFeesMap, [asOf(D(10))]),
+    'launchpad_dex_volume_vs_mean_7d',
+    'pump.fun',
+    D(10)
+  );
+  check(
+    'volume 0 com fees 0 permanece zero: value = -1',
+    zeroFeesRow?.status === 'ok' && approx(value(zeroFeesRow), -1),
+    `status=${zeroFeesRow?.status} value=${value(zeroFeesRow)}`
+  );
+  check('volume 0 com fees 0: inputCount = 7', zeroFeesRow?.inputCount === 7, `inputCount=${zeroFeesRow?.inputCount}`);
+
+  // 10) volume 0 com fees ausentes continua zero real.
+  const zeroNoFeesMap: SeriesMap = {
+    [pumpDex]: points([100, 100, 100, 100, 100, 100, 100, 100, 100, 0]),
+  };
+  const zeroNoFeesRow = findRow(
+    computeLaunchpadIndicatorRows(zeroNoFeesMap, [asOf(D(10))]),
+    'launchpad_dex_volume_vs_mean_7d',
+    'pump.fun',
+    D(10)
+  );
+  check(
+    'volume 0 com fees ausentes permanece zero: value = -1',
+    zeroNoFeesRow?.status === 'ok' && approx(value(zeroNoFeesRow), -1),
+    `status=${zeroNoFeesRow?.status} value=${value(zeroNoFeesRow)}`
+  );
+  check('volume 0 com fees ausentes: inputCount = 7', zeroNoFeesRow?.inputCount === 7, `inputCount=${zeroNoFeesRow?.inputCount}`);
+
+  // 11) change_7d em t (volume suspeito) e em t+7 (base suspeita) -> insufficient_history.
+  const changeSuspectValues = Array.from({ length: 17 }, (_, index) => (index === 9 ? 0 : 100));
+  const changeSuspectFees = Array.from({ length: 17 }, (_, index) => (index === 9 ? 500 : null));
+  const changeSuspectMap: SeriesMap = {
+    [pumpDex]: points(changeSuspectValues),
+    [pumpFees]: points(changeSuspectFees),
+  };
+  const changeSuspectRows = computeLaunchpadIndicatorRows(changeSuspectMap, [asOf(D(10)), asOf(D(17))]);
+  const changeAtT = findRow(changeSuspectRows, 'launchpad_dex_volume_change_7d', 'pump.fun', D(10));
+  const changeAtT7 = findRow(changeSuspectRows, 'launchpad_dex_volume_change_7d', 'pump.fun', D(17));
+  check(
+    'change_7d em t suspeito -> insufficient_history',
+    changeAtT?.status === 'insufficient_history' && changeAtT?.value === null,
+    JSON.stringify(changeAtT?.status)
+  );
+  check(
+    'change_7d em t+7 com base suspeita -> insufficient_history',
+    changeAtT7?.status === 'insufficient_history' && changeAtT7?.value === null,
+    JSON.stringify(changeAtT7?.status)
+  );
+
+  // 12) share com 6 datas comuns válidas (uma suspeita excluída) continua ok.
+  const shareSuspectMap: SeriesMap = {};
+  LAUNCHPAD_SLUGS.forEach((slug, index) => {
+    const base = (index + 1) * 10;
+    const values: (number | null)[] = [
+      null,
+      null,
+      null,
+      base,
+      slug === 'pump.fun' ? 0 : base,
+      base,
+      base,
+      base,
+      base,
+      base,
+    ];
+    shareSuspectMap[LAUNCHPAD_SERIES_IDS[slug].dex] = points(values);
+  });
+  shareSuspectMap[pumpFees] = points([null, null, null, null, 500, null, null, null, null, null]);
+  const shareSuspectRows = computeLaunchpadIndicatorRows(shareSuspectMap, [asOf(D(10))]);
+  const suspectShares = LAUNCHPAD_SLUGS.map((slug) => findRow(shareSuspectRows, 'launchpad_dex_volume_share_7d', slug, D(10)));
+  check('share suspeito: 4 linhas ok', suspectShares.every((r) => r?.status === 'ok'), JSON.stringify(suspectShares.map((r) => r?.status)));
+  check(
+    'share suspeito: 0.1/0.2/0.3/0.4',
+    approx(value(suspectShares[0]), 0.1) &&
+      approx(value(suspectShares[1]), 0.2) &&
+      approx(value(suspectShares[2]), 0.3) &&
+      approx(value(suspectShares[3]), 0.4),
+    suspectShares.map((r) => value(r)).join(',')
+  );
+  check('share suspeito: soma = 1', approx(suspectShares.reduce((acc, r) => acc + (value(r) ?? 0), 0), 1));
+  check('share suspeito: inputCount = 6', suspectShares[0]?.inputCount === 6, `inputCount=${suspectShares[0]?.inputCount}`);
+
+  // 13) cohort inteiro sem dados: nenhuma linha (não congela insufficient_history).
   check('cohort sem nenhum ponto -> nenhuma linha', computeLaunchpadIndicatorRows({}, [asOf(D(10))]).length === 0);
 }
 

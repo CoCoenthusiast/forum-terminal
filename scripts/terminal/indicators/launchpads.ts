@@ -32,6 +32,7 @@ const HISTORY_PROVIDER = { history: 'defillama_history', live: null } as const;
 export interface LaunchpadSeriesIds {
   dex: string;
   fees: string;
+  dexInput: string;
 }
 
 function buildSeriesId(metric: string, slug: LaunchpadSlug): string {
@@ -40,11 +41,17 @@ function buildSeriesId(metric: string, slug: LaunchpadSlug): string {
 
 export const LAUNCHPAD_SERIES_IDS: Record<LaunchpadSlug, LaunchpadSeriesIds> = {} as Record<LaunchpadSlug, LaunchpadSeriesIds>;
 for (const slug of LAUNCHPAD_SLUGS) {
+  const dex = buildSeriesId(DEX_METRIC, slug);
   LAUNCHPAD_SERIES_IDS[slug] = {
-    dex: buildSeriesId(DEX_METRIC, slug),
+    dex,
     fees: buildSeriesId(FEES_METRIC, slug),
+    dexInput: `${dex}:volume0_fees>0_excluido`,
   };
 }
+
+const DEX_INPUT_BY_SERIES_ID = new Map(
+  LAUNCHPAD_SLUGS.map((slug) => [LAUNCHPAD_SERIES_IDS[slug].dex, LAUNCHPAD_SERIES_IDS[slug].dexInput])
+);
 
 export interface LaunchpadSeriesDef {
   id: string;
@@ -86,6 +93,35 @@ function toValueMap(points: readonly Point[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const p of points) map.set(p.date, p.value);
   return map;
+}
+
+// Pontos com valor numérico. A série de exibição (dexInput) carrega, apenas para
+// impressão, pontos marcados como string; o cálculo nunca os consome.
+function numericPoints(points: readonly Point[]): Point[] {
+  return points.filter((p) => typeof p.value === 'number');
+}
+
+// HIPÓTESE (ver config.ts): volume 0 com fees > 0 na mesma data é tratado como
+// ausente. Fees 0 ou ausente mantém o zero real. As séries brutas não mudam.
+function usableDexPoints(series: SeriesMap, slug: LaunchpadSlug): Point[] {
+  const ids = LAUNCHPAD_SERIES_IDS[slug];
+  const feesMap = toValueMap(numericPoints(seriesOf(series, ids.fees)));
+  return numericPoints(seriesOf(series, ids.dex)).filter(
+    (point) => !(point.value === 0 && (feesMap.get(point.date) ?? 0) > 0)
+  );
+}
+
+// Série somente de exibição usada nos inputs: mantém todas as datas e marca o
+// ponto excluído com o motivo, para a linha gerada mostrar a exclusão.
+function displayDexPoints(series: SeriesMap, slug: LaunchpadSlug): Point[] {
+  const ids = LAUNCHPAD_SERIES_IDS[slug];
+  const feesMap = toValueMap(numericPoints(seriesOf(series, ids.fees)));
+  return seriesOf(series, ids.dex).map((point) => {
+    if (typeof point.value !== 'number' || point.value !== 0) return point;
+    const fees = feesMap.get(point.date);
+    if (fees === undefined || fees <= 0) return point;
+    return { date: point.date, value: `EXCLUIDO(volume=0,fees=${fees})` as unknown as number };
+  });
 }
 
 function commonDates(maps: readonly Map<string, number>[], from: string, to: string): string[] {
@@ -148,18 +184,19 @@ function makeVsMean(
   slug: LaunchpadSlug,
   seriesId: string,
   window: number,
-  minPoints: number
+  minPoints: number,
+  options?: { inputs?: readonly string[]; points?: (series: SeriesMap) => Point[] }
 ): LaunchpadIndicatorDef {
   return {
     indicator,
     scope: buildProtocolScope(slug),
     unit: 'FRACTION',
-    inputs: [seriesId],
+    inputs: options?.inputs ?? [seriesId],
     window,
     minPoints,
     resolveAsOf: (series, requestedAsOf) => lastDateUpTo(seriesOf(series, seriesId), requestedAsOf),
     compute: (series, asOf) => {
-      const points = seriesOf(series, seriesId);
+      const points = options?.points === undefined ? numericPoints(seriesOf(series, seriesId)) : options.points(series);
       const windowStart = addDays(asOf, 1 - window);
       const current = pointAt(points, asOf);
       if (current === undefined) {
@@ -188,18 +225,19 @@ function makeChange(
   indicator: string,
   slug: LaunchpadSlug,
   seriesId: string,
-  window: number
+  window: number,
+  options?: { inputs?: readonly string[]; points?: (series: SeriesMap) => Point[] }
 ): LaunchpadIndicatorDef {
   return {
     indicator,
     scope: buildProtocolScope(slug),
     unit: 'FRACTION',
-    inputs: [seriesId],
+    inputs: options?.inputs ?? [seriesId],
     window,
     minPoints: 2,
     resolveAsOf: (series, requestedAsOf) => lastDateUpTo(seriesOf(series, seriesId), requestedAsOf),
     compute: (series, asOf) => {
-      const points = seriesOf(series, seriesId);
+      const points = options?.points === undefined ? numericPoints(seriesOf(series, seriesId)) : options.points(series);
       const baseDate = addDays(asOf, -window);
       const current = pointAt(points, asOf);
       const base = pointAt(points, baseDate);
@@ -222,15 +260,15 @@ function makeFeesToVolume(slug: LaunchpadSlug, window: number, minPoints: number
     indicator,
     scope: buildProtocolScope(slug),
     unit: 'RATIO',
-    inputs: [ids.fees, ids.dex],
+    inputs: [ids.fees, ids.dexInput],
     window,
     minPoints,
     resolveAsOf: (series, requestedAsOf) =>
       lastCommonDateUpTo([seriesOf(series, ids.fees), seriesOf(series, ids.dex)], requestedAsOf),
     compute: (series, asOf) => {
       const windowStart = addDays(asOf, 1 - window);
-      const feesMap = toValueMap(seriesOf(series, ids.fees));
-      const dexMap = toValueMap(seriesOf(series, ids.dex));
+      const feesMap = toValueMap(numericPoints(seriesOf(series, ids.fees)));
+      const dexMap = toValueMap(usableDexPoints(series, slug));
       const dates = commonDates([feesMap, dexMap], windowStart, asOf);
       if (dates.length < minPoints) {
         return insufficientResult(
@@ -258,20 +296,25 @@ function makeShare(
   seriesIds: readonly string[],
   index: number,
   window: number,
-  minPoints: number
+  minPoints: number,
+  useVolumeExclusion = false
 ): LaunchpadIndicatorDef {
   return {
     indicator,
     scope: buildProtocolScope(slug),
     unit: 'FRACTION',
-    inputs: [...seriesIds],
+    inputs: useVolumeExclusion ? seriesIds.map((id) => DEX_INPUT_BY_SERIES_ID.get(id) ?? id) : [...seriesIds],
     window,
     minPoints,
     resolveAsOf: (series, requestedAsOf) =>
       lastCommonDateUpTo(seriesIds.map((id) => seriesOf(series, id)), requestedAsOf),
     compute: (series, asOf) => {
       const windowStart = addDays(asOf, 1 - window);
-      const maps = seriesIds.map((id) => toValueMap(seriesOf(series, id)));
+      const maps = seriesIds.map((id, seriesIndex) =>
+        toValueMap(
+          useVolumeExclusion ? usableDexPoints(series, LAUNCHPAD_SLUGS[seriesIndex]) : numericPoints(seriesOf(series, id))
+        )
+      );
       const dates = commonDates(maps, windowStart, asOf);
       if (dates.length < minPoints) {
         return insufficientResult(
@@ -300,15 +343,33 @@ function buildLaunchpadIndicators(): LaunchpadIndicatorDef[] {
   LAUNCHPAD_SLUGS.forEach((slug, index) => {
     const ids = LAUNCHPAD_SERIES_IDS[slug];
     defs.push(
-      makeVsMean('launchpad_dex_volume_vs_mean_7d', slug, ids.dex, LAUNCHPAD_WINDOW_DAYS, LAUNCHPAD_MIN_POINTS)
+      makeVsMean('launchpad_dex_volume_vs_mean_7d', slug, ids.dex, LAUNCHPAD_WINDOW_DAYS, LAUNCHPAD_MIN_POINTS, {
+        inputs: [ids.dexInput],
+        points: (series) => usableDexPoints(series, slug),
+      })
     );
     defs.push(
       makeVsMean('launchpad_fees_vs_mean_7d', slug, ids.fees, LAUNCHPAD_WINDOW_DAYS, LAUNCHPAD_MIN_POINTS)
     );
     defs.push(makeFeesToVolume(slug, LAUNCHPAD_WINDOW_DAYS, LAUNCHPAD_MIN_POINTS));
-    defs.push(makeShare('launchpad_dex_volume_share_7d', slug, dexIds, index, LAUNCHPAD_WINDOW_DAYS, LAUNCHPAD_MIN_POINTS));
+    defs.push(
+      makeShare(
+        'launchpad_dex_volume_share_7d',
+        slug,
+        dexIds,
+        index,
+        LAUNCHPAD_WINDOW_DAYS,
+        LAUNCHPAD_MIN_POINTS,
+        true
+      )
+    );
     defs.push(makeShare('launchpad_fees_share_7d', slug, feesIds, index, LAUNCHPAD_WINDOW_DAYS, LAUNCHPAD_MIN_POINTS));
-    defs.push(makeChange('launchpad_dex_volume_change_7d', slug, ids.dex, LAUNCHPAD_WINDOW_DAYS));
+    defs.push(
+      makeChange('launchpad_dex_volume_change_7d', slug, ids.dex, LAUNCHPAD_WINDOW_DAYS, {
+        inputs: [ids.dexInput],
+        points: (series) => usableDexPoints(series, slug),
+      })
+    );
     defs.push(makeChange('launchpad_fees_change_7d', slug, ids.fees, LAUNCHPAD_WINDOW_DAYS));
   });
 
@@ -362,6 +423,10 @@ export function computeLaunchpadIndicatorRows(series: SeriesMap, asOfs: readonly
   // grava com createMany + skipDuplicates e nunca atualiza linha existente.
   const hasAnyData = LAUNCHPAD_SERIES_DEFS.some((def) => (series[def.id]?.length ?? 0) > 0);
   if (!hasAnyData) return [];
+
+  for (const slug of LAUNCHPAD_SLUGS) {
+    series[LAUNCHPAD_SERIES_IDS[slug].dexInput] = displayDexPoints(series, slug);
+  }
 
   const rows: IndicatorRow[] = [];
   const seen = new Set<string>();

@@ -314,3 +314,11 @@ export type LaunchpadSlug = typeof LAUNCHPAD_SLUGS[number];
 // São limites escolhidos a dedo, não medições.
 export const LAUNCHPAD_WINDOW_DAYS = 7;
 export const LAUNCHPAD_MIN_POINTS = 6;
+
+// HIPÓTESE (tratamento de dado suspeito): quando dex_volume_daily_usd de um slug
+// é exatamente 0 na mesma data em que fees_daily_usd do MESMO slug é > 0, tratamos
+// o volume como AUSENTE no cálculo (não como zero real). Indício: em 2025-11-24,
+// pump.fun e meteora-dynamic-bonding-curve aparecem com volume 0 e fees 782669 e
+// 53211. É suspeita de dado ausente na fonte, NÃO prova. A regra só afeta o
+// cálculo dos indicadores; as séries brutas e o banco não são alterados. Dia com
+// volume 0 e fees 0 ou fees ausente continua sendo zero real.
