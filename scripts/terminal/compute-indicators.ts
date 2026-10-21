@@ -14,6 +14,7 @@ import {
   type IndicatorRow,
   type SeriesMap,
 } from './indicators/catalog';
+import { LAUNCHPAD_INDICATORS, computeLaunchpadIndicatorRows } from './indicators/launchpads';
 
 const DEFAULT_DAYS = 365;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -74,11 +75,39 @@ function printDryRun(series: SeriesMap, asOfIso: string): void {
     const { result, inputs } = evaluateIndicator(def, series, asOfIso);
     const reason = result.reason === null ? '' : ` | reason: ${result.reason}`;
     console.log(
-      `${def.indicator} | ${def.scope} | ${result.status} | value=${fmt(result.value)} ${result.unit} | ${inputs.join(', ')}${reason}`
+      `${def.indicator} | ${def.scope} | ${result.status} | value=${fmt(result.value)} ${result.unit} | ${inputs.join(', ')}${reason} | asOf=${asOfIso}`
     );
   }
   const atr = ATR_INDICATOR;
-  console.log(`atr | solana | ${atr.status} | value=null ${atr.unit} | sem OHLC | reason: ${atr.reason}`);
+  console.log(`atr | solana | ${atr.status} | value=null ${atr.unit} | sem OHLC | reason: ${atr.reason} | asOf=${asOfIso}`);
+
+  // Launchpads: cada linha usa o próprio asOf (a fonte atrasa ~3 dias), então
+  // calculamos as linhas para o dia pedido e imprimimos row.asOf, não asOfIso.
+  // Isso é só leitura/impressão: rows e statusCounts do resumo continuam os de
+  // computeIndicatorRows, sem alteração de cálculo ou gravação.
+  const defByKey = new Map(LAUNCHPAD_INDICATORS.map((def) => [`${def.indicator}|${def.scope}`, def]));
+  const launchpadRows = computeLaunchpadIndicatorRows(series, [
+    { iso: asOfIso, date: new Date(`${asOfIso}T00:00:00.000Z`) },
+  ]);
+  const sortedRows = [...launchpadRows].sort(
+    (a, b) => a.indicator.localeCompare(b.indicator) || a.scope.localeCompare(b.scope)
+  );
+
+  for (const row of sortedRows) {
+    const ownAsOf = row.asOf.toISOString().slice(0, 10);
+    const fromIso = row.fromDate === null ? ownAsOf : row.fromDate.toISOString().slice(0, 10);
+    const toIso = row.toDate === null ? ownAsOf : row.toDate.toISOString().slice(0, 10);
+    const def = defByKey.get(`${row.indicator}|${row.scope}`);
+    const inputs = (def?.inputs ?? []).map((seriesId) => {
+      const used = (series[seriesId] ?? []).filter((p) => p.date >= fromIso && p.date <= toIso);
+      const body = used.length === 0 ? 'sem pontos' : used.map((p) => `${p.date}=${p.value}`).join(' ');
+      return `${seriesId} ${fromIso}..${toIso} n=${used.length} ${body}`;
+    });
+    const reason = row.reason === null ? '' : ` | reason: ${row.reason}`;
+    console.log(
+      `${row.indicator} | ${row.scope} | ${row.status} | value=${fmt(row.value === null ? null : Number(row.value.toString()))} ${row.unit} | ${inputs.join(', ')}${reason} | asOf=${ownAsOf}`
+    );
+  }
 }
 
 async function main(): Promise<void> {
