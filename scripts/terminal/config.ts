@@ -295,3 +295,22 @@ export const STATE_RULE_DOC: Record<string, string> = {
   no_collector_v1:
     'Sem coletor nesta versão. O campo fica unavailable e não inventamos nenhum valor.',
 };
+// ===== Launchpads (indicadores; estado v2 fica para outra tarefa) =====
+// HIPÓTESE: os 4 slugs abaixo não se sobrepõem no DefiLlama para
+// dex_volume_daily_usd e fees_daily_usd. O relatório do Ray não encontrou
+// nenhum campo que indique sobreposição (pais: pump, pump, raydium, meteora),
+// mas ausência de campo NÃO É PROVA. Se a fonte mudar, o share abaixo deixa de
+// ser confiável. O share vale apenas "entre os 4 slugs observados" e NUNCA deve
+// ser lido como participação do mercado de launchpads do Solana.
+export const LAUNCHPAD_SLUGS = [
+  'pump.fun',
+  'pumpswap',
+  'launchlab',
+  'meteora-dynamic-bonding-curve',
+] as const;
+export type LaunchpadSlug = typeof LAUNCHPAD_SLUGS[number];
+
+// HIPÓTESE: janela de 7 dias e cobertura mínima de 80% (6 de 7 pontos).
+// São limites escolhidos a dedo, não medições.
+export const LAUNCHPAD_WINDOW_DAYS = 7;
+export const LAUNCHPAD_MIN_POINTS = 6;

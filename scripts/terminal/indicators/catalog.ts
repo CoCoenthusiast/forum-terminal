@@ -13,6 +13,7 @@ import {
   addDays,
   PERMANENTLY_UNAVAILABLE,
 } from './formulas';
+import { LAUNCHPAD_SERIES_DEFS, computeLaunchpadIndicatorRows } from './launchpads';
 
 export type Unit = 'FRACTION' | 'RATIO' | 'ZSCORE' | 'INDEX';
 
@@ -61,6 +62,7 @@ const SERIES_DEFS: SeriesDef[] = [
     load: async (r, f, t, u) =>
       (await loadMetricSeries(r, 'solana', 'tvl_usd', { history: 'defillama_history', live: 'defillama' }, f, t, u)).series,
   },
+  ...LAUNCHPAD_SERIES_DEFS,
 ];
 
 // Carrega cada série UMA vez por execução, num intervalo (from, to), nunca por dia.
@@ -311,6 +313,14 @@ export function computeIndicatorRows(series: SeriesMap, asOfs: AsOfDate[]): Comp
       formulaVersion: FORMULA_VERSION,
     });
     statusCounts[atr.status] = (statusCounts[atr.status] ?? 0) + 1;
+  }
+
+  // Launchpads: indicadores com asOf próprio (a fonte atrasa ~3 dias). Não entram
+  // em INDICATORS porque o laço acima usa o asOf pedido para todos; aqui cada
+  // linha resolve a própria data e é deduplicada em computeLaunchpadIndicatorRows.
+  for (const row of computeLaunchpadIndicatorRows(series, asOfs)) {
+    rows.push(row);
+    statusCounts[row.status] = (statusCounts[row.status] ?? 0) + 1;
   }
 
   return { rows, statusCounts };
