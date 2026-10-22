@@ -12,8 +12,15 @@ import {
   STATE_LIQ_MIN_SIGNALS,
   STATE_MAX_LEG_LAG_DAYS,
   STATE_MAX_LEG_LAG_DAYS_DEX,
+  STATE_MAX_LEG_LAG_DAYS_LAUNCHPAD,
+  STATE_LAUNCHPAD_VS_MEAN_STRONG,
+  STATE_LAUNCHPAD_VS_MEAN_WEAK,
+  STATE_LAUNCHPAD_MIN_USABLE_SLUGS,
+  STATE_LAUNCHPAD_MIN_MAJORITY_SLUGS,
   STATE_DATA_QUALITY_CORE,
   STATE_RULE_DOC,
+  LAUNCHPAD_SLUGS,
+  buildProtocolScope,
 } from '../config';
 
 // Módulo SOL State: função PURA. Não lê banco, não chama rede, não recalcula
@@ -67,6 +74,33 @@ export interface StateField<C extends string> {
   reason: string | null;
 }
 
+export type LaunchpadClassification = 'strong' | 'neutral' | 'weak' | 'unavailable';
+export type LaunchpadSlug = (typeof LAUNCHPAD_SLUGS)[number];
+
+export interface LaunchpadIndicatorState {
+  indicator: string;
+  scope: string;
+  asOf: string | null;
+  status: string | null;
+  value: number | null;
+  unit: string | null;
+  role: 'decides' | 'context';
+  stale: boolean;
+  reason: string | null;
+}
+
+export interface LaunchpadSlugState {
+  asOf: string | null;
+  classification: LaunchpadClassification;
+  divergent: boolean;
+  reason: string | null;
+  indicators: LaunchpadIndicatorState[];
+}
+
+export interface LaunchpadsField extends StateField<LaunchpadClassification> {
+  bySlug: Record<LaunchpadSlug, LaunchpadSlugState>;
+}
+
 export interface DataQuality {
   score: number;
   slotsOk: number;
@@ -94,7 +128,7 @@ export interface MarketState {
   spot: StateField<FlowClassification>;
   onchain_liquidity: StateField<FlowClassification>;
   leverage: StateField<'unavailable'>;
-  launchpads: StateField<'unavailable'>;
+  launchpads: LaunchpadsField;
   macro: StateField<'unavailable'>;
   data_quality: DataQuality;
   rulesApplied: RulesApplied[];
@@ -143,6 +177,7 @@ export function latestByIndicator(rows: readonly StateIndicatorInput[]): Map<str
 }
 
 function maxLagFor(indicator: string): number {
+  if (indicator.startsWith('launchpad_')) return STATE_MAX_LEG_LAG_DAYS_LAUNCHPAD;
   return indicator.startsWith('dex_volume_vs_mean') ? STATE_MAX_LEG_LAG_DAYS_DEX : STATE_MAX_LEG_LAG_DAYS;
 }
 
@@ -338,6 +373,134 @@ function computeOnchainLiquidity(map: Map<string, StateIndicatorInput>, referenc
   return { classification, rule: ruleId, ruleDescription: ruleDoc(ruleId), evidence: ev, reason: null };
 }
 
+const LAUNCHPAD_DECIDERS = [
+  'launchpad_dex_volume_vs_mean_7d',
+  'launchpad_fees_vs_mean_7d',
+] as const;
+
+const LAUNCHPAD_CONTEXT = [
+  'launchpad_fees_to_volume_7d',
+  'launchpad_dex_volume_share_7d',
+  'launchpad_fees_share_7d',
+  'launchpad_dex_volume_change_7d',
+  'launchpad_fees_change_7d',
+] as const;
+
+function launchpadEntry(
+  indicator: string,
+  scope: string,
+  row: StateIndicatorInput | undefined,
+  referenceAsOf: string,
+  role: 'decides' | 'context'
+): LaunchpadIndicatorState {
+  const u = usability(row, referenceAsOf);
+  return {
+    indicator,
+    scope,
+    asOf: row?.asOf ?? null,
+    status: row?.status ?? null,
+    value: row !== undefined && typeof row.value === 'number' && Number.isFinite(row.value) ? row.value : null,
+    unit: row?.unit ?? null,
+    role,
+    stale: u.stale,
+    reason: u.usable ? null : u.reason,
+  };
+}
+
+function maxAsOf(rows: readonly (StateIndicatorInput | undefined)[]): string | null {
+  let max: string | null = null;
+  for (const row of rows) {
+    if (row !== undefined && (max === null || row.asOf > max)) max = row.asOf;
+  }
+  return max;
+}
+
+function classifyLaunchpadSlug(
+  volume: number,
+  fees: number
+): { classification: Exclude<LaunchpadClassification, 'unavailable'>; divergent: boolean } {
+  const volumeStrong = volume >= STATE_LAUNCHPAD_VS_MEAN_STRONG;
+  const volumeWeak = volume <= STATE_LAUNCHPAD_VS_MEAN_WEAK;
+  const feesStrong = fees >= STATE_LAUNCHPAD_VS_MEAN_STRONG;
+  const feesWeak = fees <= STATE_LAUNCHPAD_VS_MEAN_WEAK;
+  const divergent = (volumeStrong && feesWeak) || (volumeWeak && feesStrong);
+  if (volumeStrong && feesStrong) return { classification: 'strong', divergent: false };
+  if (volumeWeak && feesWeak) return { classification: 'weak', divergent: false };
+  return { classification: 'neutral', divergent };
+}
+
+function computeLaunchpads(map: Map<string, StateIndicatorInput>, referenceAsOf: string): LaunchpadsField {
+  const ruleId = 'launchpads_activity_v2';
+  const bySlug = {} as Record<LaunchpadSlug, LaunchpadSlugState>;
+  const overallEvidence: Evidence[] = [];
+  const usableClasses: LaunchpadClassification[] = [];
+  const unavailable: string[] = [];
+
+  for (const slug of LAUNCHPAD_SLUGS) {
+    const scope = buildProtocolScope(slug);
+    const decisions = LAUNCHPAD_DECIDERS.map((indicator) => {
+      const row = map.get(`${indicator}|${scope}`);
+      const u = usability(row, referenceAsOf);
+      const ev = evidence(row, 'decides', u.stale);
+      if (ev !== null) overallEvidence.push(ev);
+      return { indicator, row, u };
+    });
+
+    const indicators: LaunchpadIndicatorState[] = [
+      ...LAUNCHPAD_DECIDERS.map((indicator) =>
+        launchpadEntry(indicator, scope, map.get(`${indicator}|${scope}`), referenceAsOf, 'decides')
+      ),
+      ...LAUNCHPAD_CONTEXT.map((indicator) =>
+        launchpadEntry(indicator, scope, map.get(`${indicator}|${scope}`), referenceAsOf, 'context')
+      ),
+    ];
+    const asOf = maxAsOf(decisions.map((d) => d.row));
+    const blocked = decisions.filter((d) => !d.u.usable);
+
+    if (blocked.length > 0) {
+      const reason = blocked.map((d) => `${d.indicator} (${d.u.reason})`).join('; ');
+      bySlug[slug] = { asOf, classification: 'unavailable', divergent: false, reason, indicators };
+      unavailable.push(`${slug}: ${reason}`);
+      continue;
+    }
+
+    const volume = decisions[0].row!.value as number;
+    const fees = decisions[1].row!.value as number;
+    const { classification, divergent } = classifyLaunchpadSlug(volume, fees);
+    bySlug[slug] = { asOf, classification, divergent, reason: null, indicators };
+    usableClasses.push(classification);
+  }
+
+  if (usableClasses.length < STATE_LAUNCHPAD_MIN_USABLE_SLUGS) {
+    return {
+      classification: 'unavailable',
+      rule: ruleId,
+      ruleDescription: ruleDoc(ruleId),
+      evidence: overallEvidence,
+      reason: `slugs indisponíveis: ${unavailable.join('; ')}`,
+      bySlug,
+    };
+  }
+
+  const strongCount = usableClasses.filter((classification) => classification === 'strong').length;
+  const weakCount = usableClasses.filter((classification) => classification === 'weak').length;
+  const classification: LaunchpadClassification =
+    strongCount >= STATE_LAUNCHPAD_MIN_MAJORITY_SLUGS && strongCount > weakCount
+      ? 'strong'
+      : weakCount >= STATE_LAUNCHPAD_MIN_MAJORITY_SLUGS && weakCount > strongCount
+        ? 'weak'
+        : 'neutral';
+
+  return {
+    classification,
+    rule: ruleId,
+    ruleDescription: ruleDoc(ruleId),
+    evidence: overallEvidence,
+    reason: null,
+    bySlug,
+  };
+}
+
 function computeDataQuality(map: Map<string, StateIndicatorInput>, referenceAsOf: string, fields: Record<string, string>): DataQuality {
   const sourcesUsed: DataQuality['sourcesUsed'] = [];
   const missingCore: DataQuality['missingCore'] = [];
@@ -388,7 +551,7 @@ export function computeMarketState(input: MarketStateInput): MarketState {
   const onchain_liquidity = computeOnchainLiquidity(map, referenceAsOf);
 
   const leverage = unavailableField('no_collector_v1');
-  const launchpads = unavailableField('no_collector_v1');
+  const launchpads = computeLaunchpads(map, referenceAsOf);
   const macro = unavailableField('no_collector_v1');
 
   const data_quality = computeDataQuality(map, referenceAsOf, {
@@ -420,6 +583,11 @@ export function computeMarketState(input: MarketStateInput): MarketState {
     liq_min_signals: STATE_LIQ_MIN_SIGNALS,
     max_leg_lag_days: STATE_MAX_LEG_LAG_DAYS,
     max_leg_lag_days_dex: STATE_MAX_LEG_LAG_DAYS_DEX,
+    max_leg_lag_days_launchpad: STATE_MAX_LEG_LAG_DAYS_LAUNCHPAD,
+    launchpad_vs_mean_strong: STATE_LAUNCHPAD_VS_MEAN_STRONG,
+    launchpad_vs_mean_weak: STATE_LAUNCHPAD_VS_MEAN_WEAK,
+    launchpad_min_usable_slugs: STATE_LAUNCHPAD_MIN_USABLE_SLUGS,
+    launchpad_min_majority_slugs: STATE_LAUNCHPAD_MIN_MAJORITY_SLUGS,
   };
 
   return {

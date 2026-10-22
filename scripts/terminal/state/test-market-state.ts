@@ -205,11 +205,14 @@ check('18) entrada vazia: 4 campos insufficient_data, sem exceção',
       && s.data_quality.oldestAsOf === null;
   })());
 
-check('19) leverage, launchpads e macro sempre unavailable com rule no_collector_v1',
+check('19) leverage/macro seguem no_collector_v1 e launchpads fica unavailable sem os 3 slugs',
   (() => {
     const s = state();
     return s.leverage.classification === 'unavailable' && s.leverage.rule === 'no_collector_v1'
-      && s.launchpads.classification === 'unavailable' && s.launchpads.rule === 'no_collector_v1'
+      && s.launchpads.classification === 'unavailable' && s.launchpads.rule === 'launchpads_activity_v2'
+      && Object.keys(s.launchpads.bySlug).length === 4
+      && s.launchpads.bySlug['pump.fun'].classification === 'unavailable'
+      && s.launchpads.reason !== null && s.launchpads.reason.includes('pump.fun')
       && s.macro.classification === 'unavailable' && s.macro.rule === 'no_collector_v1'
       && s.leverage.evidence.length === 0;
   })());

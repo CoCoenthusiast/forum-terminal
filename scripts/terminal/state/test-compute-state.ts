@@ -4,6 +4,7 @@ import { PrismaClient } from '../generated/db/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Decimal } from '../prisma-types';
 import { computeMarketState } from './market-state';
+import { LAUNCHPAD_SLUGS, buildProtocolScope } from '../config';
 import {
   MAX_BACKFILL_DAYS,
   READ_WINDOW_DAYS,
@@ -402,7 +403,34 @@ async function runDbSection(url: string): Promise<void> {
     const { from, to } = buildWindow(KEEP_ASOF, READ_WINDOW_DAYS);
     const rows = await loadIndicatorRows(prisma, from, to, TEST_FV);
     check('db: lê 9 linhas da versão de teste', rows.length === 9, `(recebeu ${rows.length})`);
-    const state = computeMarketState(buildMarketStateInput(rows, KEEP_ASOF));
+
+    const lpSeeds = LAUNCHPAD_SLUGS.flatMap((slug) => {
+      const scope = buildProtocolScope(slug);
+      const asOf = new Date(asOfMs - 2 * DAY_MS);
+      return [
+        { indicator: 'launchpad_dex_volume_vs_mean_7d', scope, asOf, value: '0.30' },
+        { indicator: 'launchpad_fees_vs_mean_7d', scope, asOf, value: '0.25' },
+      ];
+    });
+    await prisma.indicatorSnapshot.createMany({
+      data: lpSeeds.map((s) => ({
+        indicator: s.indicator,
+        scope: s.scope,
+        asOf: s.asOf,
+        status: 'ok',
+        value: new Decimal(s.value),
+        unit: 'FRACTION',
+        inputCount: 7,
+        formulaVersion: TEST_FV,
+      })),
+    });
+
+    const rowsWithLaunchpads = await loadIndicatorRows(prisma, from, to, TEST_FV);
+    check('db: lê 17 linhas com os 8 decisores launchpad', rowsWithLaunchpads.length === 17, `(recebeu ${rowsWithLaunchpads.length})`);
+    const state = computeMarketState(buildMarketStateInput(rowsWithLaunchpads, KEEP_ASOF));
+    check('db: launchpads strong com asOf próprio', state.launchpads.classification === 'strong'
+      && state.launchpads.bySlug['pump.fun'].asOf === '2001-01-01');
+    check('db: qualidade continua 9/9 com launchpads', state.data_quality.slotsOk === 9 && state.data_quality.slotsTotal === 9);
     check('db: tendência bullish', state.sol_trend.classification === 'bullish', `(${state.sol_trend.classification})`);
 
     const firstNow = new Date('2001-01-04T00:00:00Z');
@@ -444,6 +472,37 @@ async function runDbSection(url: string): Promise<void> {
     const emptyState = computeMarketState(buildMarketStateInput([], KEEP_ASOF));
     if (shouldPersist(emptyState)) await saveMarketStates(prisma, [toMarketStateRow(emptyState, 'backfill', firstNow)]);
     check('db: não grava score 0', (await prisma.marketState.count({ where: { asOf: asOfDate, computeMode: 'backfill' } })) === 1);
+
+    // 7) v1 e v2 coexistem no mesmo asOf (chave inclui stateVersion/rulesVersion)
+    const v1ComputedAt = new Date('2001-02-03T00:00:00Z');
+    await prisma.marketState.create({
+      data: {
+        asOf: asOfDate,
+        stateVersion: 'sol_state_v1',
+        rulesVersion: 'state_rules_v1',
+        computeMode: 'backfill',
+        dataQualityScore: 1,
+        oldestDataDate: new Date('2001-01-01T00:00:00Z'),
+        payload: JSON.parse(JSON.stringify({ ...state, stateVersion: 'sol_state_v1', rulesVersion: 'state_rules_v1' })),
+        computedAt: v1ComputedAt,
+      },
+    });
+    const v1Where = {
+      asOf_stateVersion_rulesVersion_computeMode: {
+        asOf: asOfDate,
+        stateVersion: 'sol_state_v1',
+        rulesVersion: 'state_rules_v1',
+        computeMode: 'backfill' as const,
+      },
+    };
+    const v1Before = await prisma.marketState.findUnique({ where: v1Where });
+    await saveMarketStates(prisma, [toMarketStateRow(state, 'backfill', new Date('2001-02-04T00:00:00Z'))]);
+    const v1After = await prisma.marketState.findUnique({ where: v1Where });
+    check('db: v1 coexiste com v2 no mesmo asOf/modo', v1Before !== null
+      && (await prisma.marketState.count({ where: { asOf: asOfDate, computeMode: 'backfill' } })) === 2);
+    check('db: regravar v2 não altera o payload v1', JSON.stringify(v1Before?.payload) === JSON.stringify(v1After?.payload));
+    check('db: regravar v2 não altera o computedAt v1', v1Before?.computedAt.getTime() === v1After?.computedAt.getTime());
+    check('db: total do dia inclui v1 e as duas linhas v2', (await prisma.marketState.count({ where: { asOf: asOfDate } })) === 3);
   } catch (e) {
     check('db: seção de banco executou', false, e instanceof Error ? e.message : String(e));
   } finally {

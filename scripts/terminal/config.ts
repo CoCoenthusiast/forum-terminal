@@ -243,8 +243,8 @@ export interface BackfillSeriesResult {
 // ficam em inglês; os textos explicativos ficam em STATE_RULE_DOC (português),
 // separados, porque o texto visível no site terá de ser traduzido para inglês depois.
 
-export const STATE_RULES_VERSION = 'state_rules_v1';
-export const STATE_VERSION = 'sol_state_v1';
+export const STATE_RULES_VERSION = 'state_rules_v2';
+export const STATE_VERSION = 'sol_state_v2';
 
 // Tendência: usa só return_7d (solana). +3% / -3% na semana.
 export const STATE_TREND_RETURN7D_BULLISH = 0.03;
@@ -294,6 +294,8 @@ export const STATE_RULE_DOC: Record<string, string> = {
     'Liquidez onchain: stablecoins, TVL e volume de DEX no Solana comparados com a média de 7 dias, cada um 5% para cima (expanding) ou para baixo (contracting). Precisa de pelo menos 2 dos 3 sinais concordando; sem isso, é neutral. Se faltar dado, não arrisca palpite.',
   no_collector_v1:
     'Sem coletor nesta versão. O campo fica unavailable e não inventamos nenhum valor.',
+  launchpads_activity_v2:
+    'Atividade dos launchpads observados, não julgamento de valor. Os decisores de cada slug são o volume DEX vs média de 7 dias e as fees vs média de 7 dias; os dois precisam estar ok e frescos (até 4 dias). strong = os dois em +20% ou mais; weak = os dois em -20% ou menos; qualquer outro caso, inclusive divergência entre volume e fees, é neutral. O share vale apenas entre os 4 slugs observados, nunca como participação do mercado.',
 };
 // ===== Launchpads (indicadores; estado v2 fica para outra tarefa) =====
 // HIPÓTESE: os 4 slugs abaixo não se sobrepõem no DefiLlama para
@@ -322,3 +324,19 @@ export const LAUNCHPAD_MIN_POINTS = 6;
 // 53211. É suspeita de dado ausente na fonte, NÃO prova. A regra só afeta o
 // cálculo dos indicadores; as séries brutas e o banco não são alterados. Dia com
 // volume 0 e fees 0 ou fees ausente continua sendo zero real.
+
+// HIPÓTESE (estado v2): decisores por slug = volume DEX vs média 7d E fees vs
+// média 7d, ambos exigidos ok e frescos. strong = os dois >= +20%; weak = os dois
+// <= -20%; qualquer outro caso (inclusive divergência) = neutral. Limiares
+// escolhidos a dedo, não medições; mudar exige subir STATE_RULES_VERSION.
+export const STATE_LAUNCHPAD_VS_MEAN_STRONG = 0.20;
+export const STATE_LAUNCHPAD_VS_MEAN_WEAK = -0.20;
+
+// HIPÓTESE: no máximo 4 dias de defasagem para qualquer launchpad; acima disso o
+// slug fica unavailable em vez de mostrar dado velho.
+export const STATE_MAX_LEG_LAG_DAYS_LAUNCHPAD = 4;
+
+// HIPÓTESE: classificação geral exige pelo menos 3 dos 4 slugs utilizáveis; entre
+// os utilizáveis, strong/weak exigem pelo menos 2 slugs e maioria estrita.
+export const STATE_LAUNCHPAD_MIN_USABLE_SLUGS = 3;
+export const STATE_LAUNCHPAD_MIN_MAJORITY_SLUGS = 2;
