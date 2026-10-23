@@ -25,6 +25,11 @@ export const SAVE_BATCH_SIZE = 20;
 export const SAVE_TX_TIMEOUT_MS = 60000;
 export const SAVE_TX_MAX_WAIT_MS = 15000;
 
+// Teto rígido por lote: cobre a espera por conexão (maxWait) e o tempo da
+// transação (timeout) e ainda dá 5s de folga. Se o driver não devolver o erro,
+// este timer encerra o lote em vez de deixar o processo pendurado para sempre.
+export const SAVE_BATCH_TIMEOUT_MS = SAVE_TX_TIMEOUT_MS + SAVE_TX_MAX_WAIT_MS + 5000;
+
 // 'live' = estado do dia padrão (ontem UTC, com --save; --asof igual a ontem também é
 // 'live'). Qualquer outra gravação (--asof mais antigo ou --from/--to) é 'backfill'.
 // O backfill nunca sobrescreve 'live' porque computeMode faz parte da chave única.
@@ -295,58 +300,114 @@ export async function loadIndicatorRows(
   return rows;
 }
 
+class SaveBatchTimeoutError extends Error {
+  constructor(
+    readonly timeoutMs: number,
+    readonly first: string,
+    readonly last: string
+  ) {
+    super(`timeout de ${timeoutMs}ms no lote ${first}..${last}`);
+    this.name = 'SaveBatchTimeoutError';
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+function errorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : null;
+}
+
+function errorDetail(error: unknown): string {
+  if (error instanceof SaveBatchTimeoutError) return error.message;
+  const code = errorCode(error);
+  if (code === 'P2024') return 'timeout esperando conexão do pool (P2024)';
+  if (code === 'P2028') return 'transação expirou ou foi abortada (P2028)';
+  const detail = error instanceof Error ? error.message : String(error);
+  return detail.slice(0, 200);
+}
+
 // Grava em lotes de SAVE_BATCH_SIZE upserts. Cada lote roda numa transação
 // INTERATIVA (callback, não array) com timeout próprio, porque o pooler remoto
 // derruba transações antigas. O upsert usa a chave única
 // (asOf, stateVersion, rulesVersion, computeMode), então rodar de novo no mesmo dia
 // reescreve a mesma linha (idempotente) e um backfill não toca nas linhas 'live'.
+// Além do timeout da transação, um teto rígido por lote garante que uma falha de
+// driver/rede não deixe o processo esperando indefinidamente.
 export async function saveMarketStates(
   prisma: PrismaClient,
   rows: readonly MarketStateRow[],
-  batchSize: number = SAVE_BATCH_SIZE
+  batchSize: number = SAVE_BATCH_SIZE,
+  batchTimeoutMs: number = SAVE_BATCH_TIMEOUT_MS
 ): Promise<number> {
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    throw new Error(`batchSize inválido: ${batchSize}`);
+  }
+  if (!Number.isFinite(batchTimeoutMs) || batchTimeoutMs <= 0) {
+    throw new Error(`batchTimeoutMs inválido: ${batchTimeoutMs}`);
+  }
+
   let written = 0;
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
+    const first = batch[0]?.asOf.toISOString().slice(0, 10) ?? '?';
+    const last = batch[batch.length - 1]?.asOf.toISOString().slice(0, 10) ?? '?';
     try {
-      await prisma.$transaction(
-        async (tx) => {
-          for (const row of batch) {
-            await tx.marketState.upsert({
-              where: {
-                asOf_stateVersion_rulesVersion_computeMode: {
+      await withTimeout(
+        prisma.$transaction(
+          async (tx) => {
+            for (const row of batch) {
+              await tx.marketState.upsert({
+                where: {
+                  asOf_stateVersion_rulesVersion_computeMode: {
+                    asOf: row.asOf,
+                    stateVersion: row.stateVersion,
+                    rulesVersion: row.rulesVersion,
+                    computeMode: row.computeMode,
+                  },
+                },
+                create: {
                   asOf: row.asOf,
                   stateVersion: row.stateVersion,
                   rulesVersion: row.rulesVersion,
                   computeMode: row.computeMode,
+                  dataQualityScore: row.dataQualityScore,
+                  oldestDataDate: row.oldestDataDate,
+                  payload: row.payload as unknown as Prisma.InputJsonValue,
+                  computedAt: row.computedAt,
                 },
-              },
-              create: {
-                asOf: row.asOf,
-                stateVersion: row.stateVersion,
-                rulesVersion: row.rulesVersion,
-                computeMode: row.computeMode,
-                dataQualityScore: row.dataQualityScore,
-                oldestDataDate: row.oldestDataDate,
-                payload: row.payload as unknown as Prisma.InputJsonValue,
-                computedAt: row.computedAt,
-              },
-              update: {
-                dataQualityScore: row.dataQualityScore,
-                oldestDataDate: row.oldestDataDate,
-                payload: row.payload as unknown as Prisma.InputJsonValue,
-                computedAt: row.computedAt,
-              },
-            });
-          }
-        },
-        { timeout: SAVE_TX_TIMEOUT_MS, maxWait: SAVE_TX_MAX_WAIT_MS }
+                update: {
+                  dataQualityScore: row.dataQualityScore,
+                  oldestDataDate: row.oldestDataDate,
+                  payload: row.payload as unknown as Prisma.InputJsonValue,
+                  computedAt: row.computedAt,
+                },
+              });
+            }
+          },
+          { timeout: SAVE_TX_TIMEOUT_MS, maxWait: SAVE_TX_MAX_WAIT_MS }
+        ),
+        batchTimeoutMs,
+        () => new SaveBatchTimeoutError(batchTimeoutMs, first, last)
       );
     } catch (e) {
-      const first = batch[0]?.asOf.toISOString().slice(0, 10) ?? '?';
-      const last = batch[batch.length - 1]?.asOf.toISOString().slice(0, 10) ?? '?';
-      const detail = e instanceof Error ? e.message : String(e);
-      console.error(`[SAVE] lote ${first}..${last} falhou: ${detail.slice(0, 200)} — rodar de novo é seguro (idempotente)`);
+      const detail = errorDetail(e);
+      if (e instanceof SaveBatchTimeoutError) {
+        console.error(
+          `[SAVE] lote ${first}..${last} excedeu ${batchTimeoutMs}ms (timeout): ${detail} — abortando para não travar o processo; lotes anteriores já gravados; rodar de novo é seguro (idempotente)`
+        );
+      } else {
+        console.error(`[SAVE] lote ${first}..${last} falhou: ${detail} — lotes anteriores já gravados; rodar de novo é seguro (idempotente)`);
+      }
       throw e;
     }
     written += batch.length;
