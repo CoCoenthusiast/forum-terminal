@@ -177,6 +177,10 @@ export const BACKFILL_CG_MAX_RETRIES = 1;
 export const BACKFILL_DEX_METRIC_NAME = 'dex_volume_daily_usd';
 export const BACKFILL_DEX_CHART_KEY = 'totalDataChart';
 export const BACKFILL_DEX_DAILY_QUARANTINE_DAYS = 2; // os últimos dias da série de volume DEX são revistos pela fonte; skipDuplicates não corrige valores já gravados
+// Hipótese medida em 2026-10-23: DEX e launchpads chegam com 2 dias de atraso
+// por causa da quarentena de BACKFILL_DEX_DAILY_QUARANTINE_DAYS; preço, TVL,
+// stablecoins e volume spot têm atraso 0.
+export const STATE_BACKFILL_AVAILABILITY_DELAY_DAYS = 2;
 
 // Allowlist própria do backfill por protocolo. NÃO reutilizar
 // DEFILLAMA_DEX_PROTOCOL_SLUGS: stonkfun e pump.fun-mobile-app são

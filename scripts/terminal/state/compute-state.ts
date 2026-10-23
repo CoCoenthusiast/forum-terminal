@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
-import { checkEnvironment } from '../config';
+import { checkEnvironment, STATE_BACKFILL_AVAILABILITY_DELAY_DAYS } from '../config';
 import type { Prisma, PrismaClient } from '../generated/db/client';
 import { computeMarketState, type MarketState, type MarketStateInput, type StateIndicatorInput } from './market-state';
 
@@ -228,15 +228,24 @@ export function parseRunArgs(now: Date, argv: readonly string[]): RunArgs {
   return { mode: 'backfill', asOf: null, days: buildDayList(fromIso, toIso), save, computeMode: 'backfill', error: null };
 }
 
+function hasBackfillAvailabilityDelay(indicator: string): boolean {
+  return indicator.startsWith('dex_volume_vs_mean') || indicator.startsWith('launchpad_');
+}
+
 // Calcula o input de cada dia em memória, a partir de UMA leitura só do intervalo.
-// Cada dia usa a janela [dia-9, dia], igual ao buildWindow do modo de um dia.
+// Cada dia usa a janela [dia-9, dia], como no buildWindow; DEX e launchpads são
+// adicionalmente limitados a dia - STATE_BACKFILL_AVAILABILITY_DELAY_DAYS.
 export function buildBackfillInputs(rows: readonly IndicatorRowRaw[], daysIso: readonly string[]): MarketStateInput[] {
   return daysIso.map((day) => {
     const dayMs = isoStartMs(day);
     const fromMs = dayMs - (READ_WINDOW_DAYS - 1) * DAY_MS;
+    const availabilityDelayMs = STATE_BACKFILL_AVAILABILITY_DELAY_DAYS * DAY_MS;
     const slice = rows.filter((row) => {
       const ms = row.asOf.getTime();
-      return ms >= fromMs && ms <= dayMs;
+      // Simula a disponibilidade ao vivo: DEX e launchpads só entram no
+      // backfill com STATE_BACKFILL_AVAILABILITY_DELAY_DAYS de atraso.
+      const cutoffMs = hasBackfillAvailabilityDelay(row.indicator) ? dayMs - availabilityDelayMs : dayMs;
+      return ms >= fromMs && ms <= cutoffMs;
     });
     return buildMarketStateInput(slice, day);
   });
