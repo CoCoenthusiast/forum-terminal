@@ -1,0 +1,35 @@
+name: Collect Tokens
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: collect-tokens
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect-tokens:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+        env:
+          DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+          DIRECT_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+      - name: Generate terminal Prisma client
+        run: npx prisma generate --schema prisma-terminal/schema.prisma
+        env:
+          DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+          DIRECT_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+          TERMINAL_DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+      - run: npx tsx scripts/terminal/collect-tokens.ts
+        env:
+          TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}

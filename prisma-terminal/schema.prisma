@@ -153,3 +153,100 @@ model MarketState {
   @@unique([asOf, stateVersion, rulesVersion, computeMode])
   @@index([stateVersion, asOf])
 }
+
+model Token {
+  id          String   @id @default(cuid())
+  network     String   @default("solana")
+  address     String
+  name        String?
+  symbol      String?
+  decimals    Int?
+  imageUrl    String?
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  captures TokenCapture[]
+  failures TokenCollectionFailure[]
+
+  @@unique([network, address])
+  @@index([symbol])
+  @@index([name])
+}
+
+model TokenCapture {
+  id            String    @id @default(cuid())
+  tokenId       String
+  priceUsd      Decimal   @db.Decimal(38, 18)
+  liquidityUsd  Decimal?  @db.Decimal(38, 2)
+  volume24hUsd  Decimal?  @db.Decimal(38, 2)
+  txCount24h    Int?
+  rawPayload    Json?
+  poolsObserved   Int?
+  buys24hObserved Int?
+  sells24hObserved Int?
+  capturedAt    DateTime  @default(now())
+
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  pools  TokenPoolCapture[]
+  holder TokenHolderCapture?
+
+  @@unique([tokenId, capturedAt])
+  @@index([tokenId, capturedAt])
+}
+
+model TokenCollectionFailure {
+  id                String   @id @default(cuid())
+  tokenId           String?
+  tokenAddress      String?
+  operation         String
+  endpoint          String
+  status            String
+  httpStatus        Int?
+  retryAfterSeconds Int?
+  errorMessage      String?
+  attempt           Int      @default(1)
+  occurredAt        DateTime @default(now())
+
+  token Token? @relation(fields: [tokenId], references: [id], onDelete: SetNull)
+
+  @@index([tokenAddress, occurredAt])
+  @@index([status, occurredAt])
+  @@index([tokenId])
+}
+
+model TokenPoolCapture {
+  id             String    @id @default(cuid())
+  captureId      String
+  poolAddress    String
+  poolName       String?
+  dexId          String?
+  reserveInUsd   Decimal?  @db.Decimal(38, 2)
+  volume24hUsd   Decimal?  @db.Decimal(38, 2)
+  buys24h        Int?
+  sells24h       Int?
+  buyers24h      Int?
+  sellers24h     Int?
+  poolCreatedAt  DateTime?
+  createdAt      DateTime  @default(now())
+
+  capture TokenCapture @relation(fields: [captureId], references: [id], onDelete: Cascade)
+
+  @@unique([captureId, poolAddress])
+  @@index([captureId])
+}
+
+model TokenHolderCapture {
+  id                String    @id @default(cuid())
+  captureId         String    @unique
+  holdersCount      Int?
+  top10Pct          Decimal?  @db.Decimal(9, 4)
+  rank11to20Pct     Decimal?  @db.Decimal(9, 4)
+  rank21to40Pct     Decimal?  @db.Decimal(9, 4)
+  restPct           Decimal?  @db.Decimal(9, 4)
+  sourceLastUpdated DateTime?
+  createdAt         DateTime  @default(now())
+
+  capture TokenCapture @relation(fields: [captureId], references: [id], onDelete: Cascade)
+}
