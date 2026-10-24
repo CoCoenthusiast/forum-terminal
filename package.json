@@ -28,6 +28,7 @@
     "test:state": "tsx scripts/terminal/state/test-market-state.ts",
     "state:compute": "tsx scripts/terminal/state/compute-state.ts",
     "state:add-regime": "tsx scripts/terminal/state/add-regime.ts",
+    "recap:draft": "tsx scripts/terminal/report-recap.ts",
     "test:compute-state": "tsx scripts/terminal/state/test-compute-state.ts"
   },
   "dependencies": {
