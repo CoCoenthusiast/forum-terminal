@@ -79,6 +79,15 @@ export function buildRecapDraft(state: MarketStateWithRegime): string {
   );
   const dataQuality = state?.data_quality;
   const delayed = staleIndicators(state);
+  const asOf = textOrNa(state?.asOf);
+  const oldestAsOf = typeof dataQuality?.oldestAsOf === 'string' && dataQuality.oldestAsOf.length > 0
+    ? dataQuality.oldestAsOf
+    : null;
+  const inputDates = oldestAsOf === null
+    ? 'Input dates: n/a.'
+    : oldestAsOf === asOf
+      ? `Input date: ${asOf}.`
+      : `Input dates: ${oldestAsOf} to ${asOf}.`;
 
   const lines = [
     `SOL Daily Recap: ${textOrNa(state?.asOf)}`,
@@ -89,7 +98,7 @@ export function buildRecapDraft(state: MarketStateWithRegime): string {
     `On-chain liquidity: ${formatClassification(state?.onchain_liquidity?.classification)}`,
     `Launchpads: ${formatClassification(state?.launchpads?.classification)}`,
     'Not covered yet: leverage and macro.',
-    `Data quality: ${formatCount(dataQuality?.slotsOk)} of ${formatCount(dataQuality?.slotsTotal)} core series available. Oldest data point: ${textOrNa(dataQuality?.oldestAsOf)}.`,
+    `Data quality: ${formatCount(dataQuality?.slotsOk)} of ${formatCount(dataQuality?.slotsTotal)} core series available. ${inputDates}`,
   ];
 
   if (delayed.length > 0) {

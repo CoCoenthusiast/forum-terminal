@@ -189,7 +189,7 @@ function run(): void {
   check('base: não cobertos', baseText.includes('Not covered yet: leverage and macro.'));
   check(
     'base: qualidade',
-    baseText.includes('Data quality: 9 of 9 core series available. Oldest data point: 2026-10-17.')
+    baseText.includes('Data quality: 9 of 9 core series available. Input date: 2026-10-17.')
   );
   check('base: sem linha de atraso', !baseText.includes('Delayed inputs:'));
   check('base: aviso fixo', baseText.includes(DISCLAIMER));
@@ -312,10 +312,41 @@ function run(): void {
   check('stale: uma única linha', staleText.split('Delayed inputs:').length === 2);
   checkClean('stale', staleText);
 
+  const differentOldest = makeState();
+  differentOldest.data_quality.oldestAsOf = '2026-10-10';
+  const differentOldestText = buildRecapDraft(differentOldest);
+  check(
+    'datas: oldest diferente',
+    differentOldestText.includes(
+      'Data quality: 9 of 9 core series available. Input dates: 2026-10-10 to 2026-10-17.'
+    )
+  );
+  checkClean('datas: oldest diferente', differentOldestText);
+
+  const equalOldest = makeState();
+  equalOldest.data_quality.oldestAsOf = '2026-10-17';
+  const equalOldestText = buildRecapDraft(equalOldest);
+  check(
+    'datas: oldest igual',
+    equalOldestText.includes(
+      'Data quality: 9 of 9 core series available. Input date: 2026-10-17.'
+    )
+  );
+  checkClean('datas: oldest igual', equalOldestText);
+
+  const nullOldest = makeState();
+  nullOldest.data_quality.oldestAsOf = null;
+  const nullOldestText = buildRecapDraft(nullOldest);
+  check(
+    'datas: oldest null',
+    nullOldestText.includes('Data quality: 9 of 9 core series available. Input dates: n/a.')
+  );
+  checkClean('datas: oldest null', nullOldestText);
+
   const noOldest = makeState();
   noOldest.data_quality.oldestAsOf = null;
   const noOldestText = buildRecapDraft(noOldest);
-  check('oldest null vira n/a', noOldestText.includes('Oldest data point: n/a.'));
+  check('oldest null vira n/a', noOldestText.includes('Input dates: n/a.'));
   checkClean('oldest null', noOldestText);
 
   const launchpadState = makeState();
