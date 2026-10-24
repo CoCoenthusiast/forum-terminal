@@ -9,6 +9,8 @@ export const POOL_WARNING = 'soma entre pools, pode contar o mesmo endereço mai
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+const MIN_PREVIOUS_INTERVAL_MS = 20 * HOUR_MS;
+const MAX_PREVIOUS_INTERVAL_MS = 28 * HOUR_MS;
 
 export interface ReportPool {
   buyers24h: number | null;
@@ -93,12 +95,14 @@ function sumPools(pools: readonly ReportPool[], field: 'buyers24h' | 'sellers24h
 }
 
 function closestToPreviousDay(captures: readonly ReportCapture[], latestAt: Date): ReportCapture | null {
-  const target = latestAt.getTime() - DAY_MS;
+  const latestMs = latestAt.getTime();
+  const target = latestMs - DAY_MS;
   let best: ReportCapture | null = null;
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const capture of captures) {
     const ms = capture.capturedAt.getTime();
-    if (ms >= latestAt.getTime()) continue;
+    const interval = latestMs - ms;
+    if (interval < MIN_PREVIOUS_INTERVAL_MS || interval > MAX_PREVIOUS_INTERVAL_MS) continue;
     const distance = Math.abs(ms - target);
     if (distance < bestDistance) {
       best = capture;
@@ -244,7 +248,14 @@ export function formatTokenReport(rows: readonly TokenReportRow[]): string {
     lines.push(
       `  buyers24h=${formatNumber(row.buyers24h, 0)} sellers24h=${formatNumber(row.sellers24h, 0)} (${POOL_WARNING})`
     );
-    lines.push(`  previousCapturedAt=${formatDate(row.previousCapturedAt)}`);
+    if (row.previousCapturedAt === null) {
+      lines.push('  previousCapturedAt=n/d');
+    } else {
+      const intervalHours = (row.latestCapturedAt.getTime() - row.previousCapturedAt.getTime()) / HOUR_MS;
+      lines.push(
+        `  previousCapturedAt=${formatDate(row.previousCapturedAt)} intervaloHoras=${intervalHours.toFixed(1)}`
+      );
+    }
     lines.push('');
   });
 

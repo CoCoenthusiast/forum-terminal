@@ -19,8 +19,11 @@ function check(name: string, ok: boolean, extra = ''): void {
   else failures++;
 }
 
+const HOUR_MS = 60 * 60 * 1000;
 const DAY = new Date('2026-10-23T15:00:00Z');
-const PREVIOUS_DAY = new Date(DAY.getTime() - 24 * 60 * 60 * 1000);
+const SIX_HOURS_BEFORE = new Date(DAY.getTime() - 6 * HOUR_MS);
+const PREVIOUS_DAY = new Date(DAY.getTime() - 24 * HOUR_MS);
+const THIRTY_HOURS_BEFORE = new Date(DAY.getTime() - 30 * HOUR_MS);
 
 function holder(count: number | null, top10: number | null, at: Date | null = null): ReportHolder {
   return { holdersCount: count, top10Pct: top10, sourceLastUpdated: at };
@@ -129,6 +132,51 @@ check(
 check(
   'com captura anterior: escolhe a mais próxima de 24 h',
   withPrevious.previousCapturedAt?.getTime() === PREVIOUS_DAY.getTime()
+);
+
+const sixHours = buildTokenReport([
+  token('SEIS_HORAS', [
+    capture({ capturedAt: DAY, liquidityUsd: 120, holder: holder(1200, 0.4, DAY) }),
+    capture({
+      capturedAt: SIX_HOURS_BEFORE,
+      liquidityUsd: 100,
+      holder: holder(1000, 0.5, SIX_HOURS_BEFORE),
+    }),
+  ]),
+])[0];
+check('captura a 6 h: liquidez n/d', sixHours.liquidityChangePct === null);
+check('captura a 6 h: holders n/d', sixHours.holdersChangePct === null);
+check('captura a 6 h: previousCapturedAt n/d', sixHours.previousCapturedAt === null);
+
+const thirtyHours = buildTokenReport([
+  token('TRINTA_HORAS', [
+    capture({ capturedAt: DAY, liquidityUsd: 120, holder: holder(1200, 0.4, DAY) }),
+    capture({
+      capturedAt: THIRTY_HOURS_BEFORE,
+      liquidityUsd: 100,
+      holder: holder(1000, 0.5, THIRTY_HOURS_BEFORE),
+    }),
+  ]),
+])[0];
+check('captura a 30 h: liquidez n/d', thirtyHours.liquidityChangePct === null);
+check('captura a 30 h: holders n/d', thirtyHours.holdersChangePct === null);
+check('captura a 30 h: previousCapturedAt n/d', thirtyHours.previousCapturedAt === null);
+
+const withPreviousText = formatTokenReport([withPrevious]);
+check('24 h: saída mostra intervaloHoras=24.0', withPreviousText.includes('intervaloHoras=24.0'));
+
+const noPreviousText = formatTokenReport([noPrevious]);
+check(
+  'sem anterior: saída mostra previousCapturedAt=n/d',
+  noPreviousText.includes('previousCapturedAt=n/d') && !noPreviousText.includes('intervaloHoras=')
+);
+check(
+  '6 h: saída mostra previousCapturedAt=n/d',
+  formatTokenReport([sixHours]).includes('previousCapturedAt=n/d')
+);
+check(
+  '30 h: saída mostra previousCapturedAt=n/d',
+  formatTokenReport([thirtyHours]).includes('previousCapturedAt=n/d')
 );
 
 const ranked = buildTokenReport([
