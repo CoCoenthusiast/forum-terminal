@@ -27,6 +27,7 @@
     "test:quality:db": "tsx scripts/terminal/test-quality-db.ts",
     "test:state": "tsx scripts/terminal/state/test-market-state.ts",
     "state:compute": "tsx scripts/terminal/state/compute-state.ts",
+    "state:add-regime": "tsx scripts/terminal/state/add-regime.ts",
     "test:compute-state": "tsx scripts/terminal/state/test-compute-state.ts"
   },
   "dependencies": {
