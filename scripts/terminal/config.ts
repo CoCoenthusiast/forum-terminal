@@ -249,6 +249,7 @@ export interface BackfillSeriesResult {
 
 export const STATE_RULES_VERSION = 'state_rules_v2';
 export const STATE_VERSION = 'sol_state_v2';
+export const REGIME_RULES_VERSION = 'regime_rules_v1';
 
 // Tendência: usa só return_7d (solana). +3% / -3% na semana.
 export const STATE_TREND_RETURN7D_BULLISH = 0.03;
