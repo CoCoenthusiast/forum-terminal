@@ -33,6 +33,8 @@ export interface Regime {
   };
 }
 
+export type MarketStateWithRegime = MarketState & { regime: Regime };
+
 const REGIME_DESCRIPTIONS: Record<RegimeId, string> = {
   trend_up_confirmed: 'SOL trend is up and relative strength versus BTC and ETH is strong.',
   trend_up_unconfirmed: 'SOL trend is up while relative strength versus BTC and ETH is neutral.',

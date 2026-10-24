@@ -4,6 +4,7 @@ import { PrismaClient } from '../generated/db/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Decimal } from '../prisma-types';
 import { computeMarketState } from './market-state';
+import { deriveRegime } from './regime';
 import { LAUNCHPAD_SLUGS, buildProtocolScope } from '../config';
 import {
   MAX_BACKFILL_DAYS,
@@ -265,8 +266,31 @@ async function runPureSection(): Promise<void> {
   check('row: versions do estado', msRow.stateVersion === bullState.stateVersion && msRow.rulesVersion === bullState.rulesVersion);
   check('row: score 9/9 = 1', approx(msRow.dataQualityScore, 1));
   check('row: oldestDataDate', msRow.oldestDataDate?.toISOString() === '2026-10-17T00:00:00.000Z');
-  check('row: payload é o estado completo', msRow.payload === bullState);
+  const { regime: payloadRegime, ...payloadWithoutRegime } = msRow.payload;
+  check('row: payload antigo idêntico ao state', JSON.stringify(payloadWithoutRegime) === JSON.stringify(bullState));
+  check('row: payload tem regime', payloadRegime !== undefined);
+  check('row: regimeId bate com deriveRegime', payloadRegime.regimeId === deriveRegime(bullState).regimeId);
+  check('row: regimeRulesVersion é regime_rules_v1', payloadRegime.regimeRulesVersion === 'regime_rules_v1');
+  check(
+    'row: decidedBy do regime',
+    payloadRegime.decidedBy.sol_trend === bullState.sol_trend.classification
+      && payloadRegime.decidedBy.sol_relative_strength === bullState.sol_relative_strength.classification
+  );
+  check(
+    'row: context do regime',
+    payloadRegime.context.spot === bullState.spot.classification
+      && payloadRegime.context.onchain_liquidity === bullState.onchain_liquidity.classification
+      && payloadRegime.context.launchpads === bullState.launchpads.classification
+  );
+  check('row: thresholdsUsed idêntico', JSON.stringify(msRow.payload.thresholdsUsed) === JSON.stringify(bullState.thresholdsUsed));
   check('row: computedAt usa now', msRow.computedAt === rowNow);
+
+  const backfillState = computeMarketState(buildBackfillInputs(bullishRows(), ['2026-10-17'])[0]);
+  const backfillRow = toMarketStateRow(backfillState, 'backfill', rowNow);
+  check(
+    'row: single e backfill produzem o mesmo regime',
+    JSON.stringify(msRow.payload.regime) === JSON.stringify(backfillRow.payload.regime)
+  );
   check('row: score parcial 8/9', approx(toMarketStateRow(brokenState, 'backfill', rowNow).dataQualityScore, 8 / 9));
 
   const emptyState = computeMarketState(buildMarketStateInput([], '2026-10-17'));

@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { checkEnvironment, STATE_BACKFILL_AVAILABILITY_DELAY_DAYS } from '../config';
 import type { Prisma, PrismaClient } from '../generated/db/client';
 import { computeMarketState, type MarketState, type MarketStateInput, type StateIndicatorInput } from './market-state';
+import { deriveRegime, type MarketStateWithRegime } from './regime';
 
 // Comando de LEITURA: lê o IndicatorSnapshot, monta o MarketStateInput, chama
 // computeMarketState e IMPRIME o resultado. Não grava nada no banco.
@@ -258,7 +259,7 @@ export interface MarketStateRow {
   computeMode: ComputeMode;
   dataQualityScore: number;
   oldestDataDate: Date | null;
-  payload: MarketState;
+  payload: MarketStateWithRegime;
   computedAt: Date;
 }
 
@@ -271,7 +272,7 @@ export function toMarketStateRow(state: MarketState, computeMode: ComputeMode, n
     computeMode,
     dataQualityScore: state.data_quality.score,
     oldestDataDate: oldest === null ? null : new Date(isoStartMs(oldest)),
-    payload: state,
+    payload: { ...state, regime: deriveRegime(state) },
     computedAt: now,
   };
 }

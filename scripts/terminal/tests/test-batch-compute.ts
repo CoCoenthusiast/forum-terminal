@@ -5,7 +5,7 @@ import { Decimal } from '../prisma-types';
 import { WRITE_BATCH_SIZE, writeRowsInBatches } from '../compute-indicators';
 import type { IndicatorRow } from '../indicators/catalog';
 import { saveMarketStates, type MarketStateRow } from '../state/compute-state';
-import type { MarketState } from '../state/market-state';
+import type { MarketStateWithRegime } from '../state/regime';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TEST_FV = 'v1-batch-500-test';
@@ -91,7 +91,7 @@ async function runTimeoutUnit(): Promise<void> {
     computeMode: 'backfill',
     dataQualityScore: 1,
     oldestDataDate: null,
-    payload: {} as MarketState,
+    payload: {} as MarketStateWithRegime,
     computedAt: new Date('2001-01-02T00:00:00.000Z'),
   };
 
