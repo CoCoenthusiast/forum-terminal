@@ -250,3 +250,23 @@ model TokenHolderCapture {
 
   capture TokenCapture @relation(fields: [captureId], references: [id], onDelete: Cascade)
 }
+
+/// Regra de uso: o coletor insere uma linha nova apenas quando o valor muda
+/// em relação à última linha da mesma série e data; nunca apaga. Leitura
+/// "como era conhecido em T" usa firstSeenAt <= T.
+model MacroObservation {
+  id           String    @id @default(cuid())
+  seriesId     String
+  source       String
+  refDate      DateTime  @db.Date
+  value        Decimal?  @db.Decimal(38, 8)
+  status       String
+  unit         String
+  publishedAt  DateTime?
+  firstSeenAt  DateTime
+  collectedAt  DateTime
+  revisionNote String?
+
+  @@unique([seriesId, refDate, collectedAt])
+  @@index([seriesId, refDate, firstSeenAt])
+}
