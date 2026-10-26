@@ -8,6 +8,7 @@
     "collect:coingecko": "tsx scripts/terminal/collect-coingecko.ts",
     "collect:defillama": "tsx scripts/terminal/collect-defillama.ts",
     "collect:hyperliquid": "tsx scripts/terminal/collect-hyperliquid.ts",
+    "collect:macro": "tsx scripts/terminal/collect-macro.ts",
     "backfill": "tsx scripts/terminal/backfill-history.ts",
     "report:quality": "tsx scripts/terminal/report-quality.ts",
     "report:tokens": "tsx scripts/terminal/report-tokens.ts",
