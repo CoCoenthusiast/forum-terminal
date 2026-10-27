@@ -6,10 +6,12 @@ import { collectMacro, parseMacroArgs } from '../collect-macro';
 import {
   InvalidPayloadError,
   MACRO_REQUEST_PAUSE_MS,
+  addUtcDays,
   estimatePublishedAt,
   formatIsoDateUtc,
   nextBusinessDay,
   parseIsoDateUtc,
+  startOfUtcDay,
   type FetchLike,
 } from '../sources/macro-config';
 import { parseTreasuryCsv } from '../sources/macro-treasury';
@@ -171,6 +173,32 @@ function effrPayload(): unknown {
   };
 }
 
+function largeNyfedPayloads(
+  startDate: Date,
+  count: number
+): { sofr: unknown; effr: unknown; startDate: Date } {
+  const sofr: Record<string, unknown>[] = [];
+  const effr: Record<string, unknown>[] = [];
+
+  for (let index = 0; index < count; index++) {
+    const effectiveDate = formatIsoDateUtc(addUtcDays(startDate, index));
+    sofr.push({
+      effectiveDate,
+      type: 'SOFR',
+      percentRate: (350 + (index % 10)) / 100,
+      revisionIndicator: '',
+    });
+    effr.push({
+      effectiveDate,
+      type: 'EFFR',
+      percentRate: (340 + (index % 10)) / 100,
+      revisionIndicator: '',
+    });
+  }
+
+  return { sofr: { refRates: sofr }, effr: { refRates: effr }, startDate };
+}
+
 function ecbCsv(): string {
   const rows = [
     ['2026-10-20', '1.1215'],
@@ -248,6 +276,31 @@ function noSleep(): { sleepImpl: (ms: number) => Promise<void>; sleeps: number[]
       sleeps.push(ms);
     },
   };
+}
+
+interface QueryLog {
+  query: string;
+  params: string;
+}
+
+function queryParams(event: QueryLog): unknown[] {
+  try {
+    const parsed = JSON.parse(event.params) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function macroQueries(events: readonly QueryLog[], operation: 'select' | 'insert'): QueryLog[] {
+  const pattern = operation === 'select' ? /^SELECT/i : /^INSERT/i;
+  return events.filter(
+    (event) => pattern.test(event.query.trim()) && event.query.includes('"MacroObservation"')
+  );
+}
+
+function queriesForSeries(events: readonly QueryLog[], seriesId: string): number {
+  return events.filter((event) => queryParams(event).some((value) => value === seriesId)).length;
 }
 
 async function runUnit(): Promise<void> {
@@ -545,7 +598,7 @@ async function latestObservation(
   });
 }
 
-async function runDb(prisma: PrismaClient): Promise<void> {
+async function runDb(prisma: PrismaClient, queryLog: QueryLog[]): Promise<void> {
   await cleanup(prisma);
 
   const fakeFirst = fakeFetch();
@@ -837,6 +890,119 @@ async function runDb(prisma: PrismaClient): Promise<void> {
 
   await cleanup(prisma);
 
+  const largeCount = 1001;
+  const largeStart = addUtcDays(startOfUtcDay(FIXED_NOW_1), -(largeCount - 1));
+  const largeFixtures = largeNyfedPayloads(largeStart, largeCount);
+  const batchLines: string[] = [];
+
+  queryLog.length = 0;
+  const largeFirst = await collectMacro({
+    prisma,
+    only: ['nyfed'],
+    backfillFrom: largeStart,
+    fetchImpl: fakeFetch(largeFixtures).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_1,
+    log: (line) => batchLines.push(line),
+    logError: () => {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const firstSelects = macroQueries(queryLog, 'select');
+  const firstInserts = macroQueries(queryLog, 'insert');
+
+  check(
+    'db: lote insere 2002 observações',
+    largeFirst.ok &&
+      largeFirst.observations === 2002 &&
+      largeFirst.inserted === 2002 &&
+      largeFirst.unchanged === 0,
+    `(observations=${largeFirst.observations} inserted=${largeFirst.inserted})`
+  );
+  check(
+    'db: 1 leitura por série no lote',
+    firstSelects.length === 2 &&
+      queriesForSeries(firstSelects, 'sofr') === 1 &&
+      queriesForSeries(firstSelects, 'effr') === 1,
+    `(selects=${firstSelects.length} sofr=${queriesForSeries(firstSelects, 'sofr')} effr=${queriesForSeries(firstSelects, 'effr')})`
+  );
+  check(
+    'db: ceil(1001/500)=3 inserções por série',
+    firstInserts.length === 6 &&
+      queriesForSeries(firstInserts, 'sofr') === 3 &&
+      queriesForSeries(firstInserts, 'effr') === 3,
+    `(inserts=${firstInserts.length} sofr=${queriesForSeries(firstInserts, 'sofr')} effr=${queriesForSeries(firstInserts, 'effr')})`
+  );
+  check(
+    'db: progresso inicia cada série',
+    batchLines.some((line) => line.includes('série=sofr lidas=0')) &&
+      batchLines.some((line) => line.includes('série=effr lidas=0'))
+  );
+  check(
+    'db: progresso registra 6 lotes',
+    batchLines.filter((line) => line.includes('lote=')).length === 6,
+    `(${batchLines.filter((line) => line.includes('lote=')).length})`
+  );
+  check(
+    'db: progresso termina cada série',
+    batchLines.some((line) =>
+      line.includes('série=sofr inseridas=1001 iguais=0 revisadas=0')
+    ) &&
+      batchLines.some((line) =>
+        line.includes('série=effr inseridas=1001 iguais=0 revisadas=0')
+      )
+  );
+
+  queryLog.length = 0;
+  const secondLines: string[] = [];
+  const largeSecond = await collectMacro({
+    prisma,
+    only: ['nyfed'],
+    backfillFrom: largeStart,
+    fetchImpl: fakeFetch(largeFixtures).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_2,
+    log: (line) => secondLines.push(line),
+    logError: () => {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const secondSelects = macroQueries(queryLog, 'select');
+  const secondInserts = macroQueries(queryLog, 'insert');
+
+  check(
+    'db: segunda execução em lote tem inserted=0',
+    largeSecond.ok &&
+      largeSecond.observations === 2002 &&
+      largeSecond.inserted === 0 &&
+      largeSecond.unchanged === 2002,
+    `(inserted=${largeSecond.inserted} unchanged=${largeSecond.unchanged})`
+  );
+  check(
+    'db: segunda execução mantém 1 leitura por série',
+    secondSelects.length === 2 &&
+      queriesForSeries(secondSelects, 'sofr') === 1 &&
+      queriesForSeries(secondSelects, 'effr') === 1,
+    `(selects=${secondSelects.length})`
+  );
+  check(
+    'db: segunda execução não insere lotes',
+    secondInserts.length === 0,
+    `(inserts=${secondInserts.length})`
+  );
+  check(
+    'db: segunda execução reporta iguais por série',
+    secondLines.some((line) =>
+      line.includes('série=sofr inseridas=0 iguais=1001 revisadas=0')
+    ) &&
+      secondLines.some((line) =>
+        line.includes('série=effr inseridas=0 iguais=1001 revisadas=0')
+      ) &&
+      !secondLines.some((line) => line.includes('lote='))
+  );
+
+  await cleanup(prisma);
+
   const dryLines: string[] = [];
   const dry = await collectMacro({
     prisma,
@@ -877,10 +1043,17 @@ async function main(): Promise<void> {
 
   if (url !== null) {
     const adapter = new PrismaPg({ connectionString: url });
-    const prisma = new PrismaClient({ adapter });
+    const prisma = new PrismaClient({
+      adapter,
+      log: [{ emit: 'event', level: 'query' }],
+    });
+    const queryLog: QueryLog[] = [];
+    prisma.$on('query', (event) => {
+      queryLog.push({ query: event.query, params: event.params });
+    });
 
     try {
-      await runDb(prisma);
+      await runDb(prisma, queryLog);
     } catch (error) {
       check('db executou', false, error instanceof Error ? error.message : String(error));
     } finally {

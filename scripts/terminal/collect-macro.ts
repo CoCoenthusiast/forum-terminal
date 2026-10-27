@@ -230,35 +230,74 @@ function dedupeObservations(
   return [...unique.values()];
 }
 
-async function latestObservation(
-  prisma: PrismaClient,
-  observation: MacroObservationValue
-): Promise<LatestObservation | null> {
-  return prisma.macroObservation.findFirst({
-    where: {
-      seriesId: observation.seriesId,
-      refDate: observation.refDate,
-    },
-    orderBy: { collectedAt: 'desc' },
-    select: { value: true, firstSeenAt: true },
-  });
+const INSERT_BATCH_SIZE = 500;
+
+class MacroPersistenceError extends Error {
+  constructor(readonly seriesId: string, message: string) {
+    super(message);
+    this.name = 'MacroPersistenceError';
+  }
 }
 
-async function persistObservations(
+interface LatestByRefDate {
+  rowsRead: number;
+  latest: Map<string, LatestObservation>;
+}
+
+async function readLatestByRefDate(
   prisma: PrismaClient,
+  seriesId: string,
+  startDate: Date,
+  endDate: Date
+): Promise<LatestByRefDate> {
+  const rows = await prisma.macroObservation.findMany({
+    where: {
+      seriesId,
+      refDate: { gte: startDate, lte: endDate },
+    },
+    orderBy: [{ refDate: 'asc' }, { collectedAt: 'desc' }],
+    select: {
+      refDate: true,
+      value: true,
+      firstSeenAt: true,
+    },
+  });
+  const latest = new Map<string, LatestObservation>();
+
+  for (const row of rows) {
+    const key = formatIsoDateUtc(row.refDate);
+
+    if (!latest.has(key)) {
+      latest.set(key, { value: row.value, firstSeenAt: row.firstSeenAt });
+    }
+  }
+
+  return { rowsRead: rows.length, latest };
+}
+
+async function persistSeries(
+  prisma: PrismaClient,
+  seriesId: string,
   observations: readonly MacroObservationValue[],
   collectedAt: Date,
-  isBackfill: boolean
+  isBackfill: boolean,
+  startDate: Date,
+  endDate: Date,
+  log: (message: string) => void
 ): Promise<{ inserted: number; unchanged: number }> {
+  const existing = await readLatestByRefDate(prisma, seriesId, startDate, endDate);
+  log(`[MACRO] série=${seriesId} lidas=${existing.rowsRead}`);
+
   const rows: InsertRow[] = [];
-  let unchanged = 0;
+  let equal = 0;
+  let revised = 0;
 
   for (const observation of observations) {
-    const latest = await latestObservation(prisma, observation);
+    const latest = existing.latest.get(formatIsoDateUtc(observation.refDate));
     const value = new Decimal(observation.value);
 
-    if (latest !== null && latest.value !== null && latest.value.equals(value)) {
-      unchanged++;
+    if (latest !== undefined && latest.value !== null && latest.value.equals(value)) {
+      equal++;
       continue;
     }
 
@@ -271,7 +310,8 @@ async function persistObservations(
       notes.push('backfill:estimated_publication');
     }
 
-    if (latest !== null) {
+    if (latest !== undefined) {
+      revised++;
       notes.push(`revised from ${latest.value?.toString() ?? 'null'}`);
     }
 
@@ -293,12 +333,74 @@ async function persistObservations(
     });
   }
 
-  const inserted =
-    rows.length === 0
-      ? 0
-      : (await prisma.macroObservation.createMany({ data: rows, skipDuplicates: true })).count;
+  const batchCount = Math.ceil(rows.length / INSERT_BATCH_SIZE);
+  let inserted = 0;
 
-  return { inserted, unchanged: unchanged + (rows.length - inserted) };
+  for (let offset = 0; offset < rows.length; offset += INSERT_BATCH_SIZE) {
+    const batch = rows.slice(offset, offset + INSERT_BATCH_SIZE);
+    const batchNumber = offset / INSERT_BATCH_SIZE + 1;
+
+    try {
+      const result = await prisma.macroObservation.createMany({
+        data: batch,
+        skipDuplicates: true,
+      });
+      inserted += result.count;
+      log(
+        `[MACRO] série=${seriesId} lote=${batchNumber}/${batchCount} inseridas=${result.count}`
+      );
+    } catch (error) {
+      throw new MacroPersistenceError(
+        seriesId,
+        `série=${seriesId} lote=${batchNumber}/${batchCount}: ${errorMessage(error)}`
+      );
+    }
+  }
+
+  log(
+    `[MACRO] série=${seriesId} inseridas=${inserted} iguais=${equal} revisadas=${revised}`
+  );
+
+  return { inserted, unchanged: equal + (rows.length - inserted) };
+}
+
+async function persistSource(
+  prisma: PrismaClient,
+  series: readonly MacroSeriesDefinition[],
+  observations: readonly MacroObservationValue[],
+  collectedAt: Date,
+  isBackfill: boolean,
+  startDate: Date,
+  endDate: Date,
+  log: (message: string) => void
+): Promise<{ inserted: number; unchanged: number }> {
+  const bySeries = new Map<string, MacroObservationValue[]>();
+
+  for (const observation of observations) {
+    const entries = bySeries.get(observation.seriesId) ?? [];
+    entries.push(observation);
+    bySeries.set(observation.seriesId, entries);
+  }
+
+  let inserted = 0;
+  let unchanged = 0;
+
+  for (const definition of series) {
+    const persisted = await persistSeries(
+      prisma,
+      definition.seriesId,
+      bySeries.get(definition.seriesId) ?? [],
+      collectedAt,
+      isBackfill,
+      startDate,
+      endDate,
+      log
+    );
+    inserted += persisted.inserted;
+    unchanged += persisted.unchanged;
+  }
+
+  return { inserted, unchanged };
 }
 
 function printDryRun(
@@ -423,7 +525,16 @@ export async function collectMacro(
       warnings.push(...result.warnings);
 
       if (!dryRun && prisma !== null && sourceRow !== null) {
-        const persisted = await persistObservations(prisma, deduped, collectedAt, isBackfill);
+        const persisted = await persistSource(
+          prisma,
+          series,
+          deduped,
+          collectedAt,
+          isBackfill,
+          startDate,
+          endDate,
+          log
+        );
         inserted += persisted.inserted;
         unchanged += persisted.unchanged;
 
@@ -444,6 +555,7 @@ export async function collectMacro(
       }
     } catch (error) {
       const status = error instanceof HttpError ? error.status : null;
+      const persistenceFailure = error instanceof MacroPersistenceError;
       const message = errorMessage(error);
       httpStatus = status;
       failures.push(`${source}: ${message}`);
@@ -469,6 +581,11 @@ export async function collectMacro(
       if (status === 429) {
         rateLimited = true;
         logError('[429] interrompendo imediatamente');
+        break;
+      }
+
+      if (persistenceFailure) {
+        logError('[MACRO] interrompendo após falha de gravação');
         break;
       }
     }
