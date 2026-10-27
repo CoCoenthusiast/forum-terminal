@@ -6,22 +6,31 @@ import { collectMacro, parseMacroArgs } from '../collect-macro';
 import {
   InvalidPayloadError,
   MACRO_REQUEST_PAUSE_MS,
+  MACRO_SERIES,
   addUtcDays,
   estimatePublishedAt,
   formatIsoDateUtc,
   nextBusinessDay,
   parseIsoDateUtc,
   startOfUtcDay,
+  type BlsSeriesDefinition,
   type FetchLike,
 } from '../sources/macro-config';
 import { parseTreasuryCsv } from '../sources/macro-treasury';
 import { parseNyfedPayload } from '../sources/macro-nyfed';
 import { parseEcbCsv } from '../sources/macro-ecb';
+import { fedH10Url, parseFedCsv } from '../sources/macro-fed';
+import { parseBlsPayload } from '../sources/macro-bls';
 
 const FIXED_NOW_1 = new Date('2026-10-26T20:00:00.000Z');
 const FIXED_NOW_2 = new Date('2026-10-26T21:00:00.000Z');
 const FIXED_NOW_3 = new Date('2026-10-26T22:00:00.000Z');
 const BACKFILL_FROM = new Date('2026-10-20T00:00:00.000Z');
+const FED_BACKFILL_FROM = new Date('2026-10-01T00:00:00.000Z');
+const BLS_BACKFILL_FROM = new Date('2026-09-01T00:00:00.000Z');
+const BLS_SERIES = MACRO_SERIES.filter(
+  (definition): definition is BlsSeriesDefinition => definition.source === 'bls'
+);
 
 const NOMINAL_HEADER =
   'Date,"1 Mo","1.5 Month","2 Mo","3 Mo","4 Mo","6 Mo","1 Yr","2 Yr","3 Yr","5 Yr","7 Yr","10 Yr","20 Yr","30 Yr"';
@@ -53,6 +62,9 @@ interface Fixtures {
   sofr?: unknown;
   effr?: unknown;
   ecb?: string;
+  fed?: string;
+  fedContentType?: string;
+  bls?: unknown;
 }
 
 interface FakeOptions {
@@ -214,6 +226,51 @@ function ecbCsv(): string {
   ].join('\n');
 }
 
+function fedCsv(): string {
+  return [
+    '"Series Description","Nominal Broad Dollar Index","Nominal Major Currencies Dollar Index"',
+    '"Unit:","Index:_1997_Jan_100","Index:_1997_Jan_100"',
+    '"Time Period","JRXWTFB_N.B","JRXWTFN_N.B","JRXWTFO_N.B"',
+    '2026-10-08,121.4469,118.1,119.2',
+    '2026-10-09,121.6023,118.4,119.5',
+    '2026-10-12,ND,NA,NA',
+    '2026-10-19,121.3248,118.0,119.1',
+    '2026-10-23,121.3202,117.9,119.0',
+  ].join('\n');
+}
+
+function blsPayload(options: { missingStatus?: boolean } = {}): unknown {
+  return {
+    status: options.missingStatus === true ? undefined : 'REQUEST_SUCCEEDED',
+    responseTime: 0,
+    message: [],
+    Results: {
+      series: [
+        {
+          seriesID: 'CUSR0000SA0',
+          data: [
+            { year: '2026', period: 'M09', value: '336.298' },
+            { year: '2026', period: 'M08', value: '-' },
+            { year: '2026', period: 'M13', value: '999.999' },
+          ],
+        },
+        {
+          seriesID: 'CUSR0000SA0L1E',
+          data: [{ year: '2026', period: 'M09', value: '338.896' }],
+        },
+        {
+          seriesID: 'LNS14000000',
+          data: [{ year: '2026', period: 'M09', value: '4.2' }],
+        },
+        {
+          seriesID: 'CES0000000001',
+          data: [{ year: '2026', period: 'M09', value: '159044' }],
+        },
+      ],
+    },
+  };
+}
+
 function textResponse(body: string): Response {
   return new Response(body, {
     status: 200,
@@ -231,11 +288,17 @@ function jsonResponse(payload: unknown): Response {
 function fakeFetch(
   fixtures: Fixtures = {},
   options: FakeOptions = {}
-): { fetchImpl: FetchLike; calls: string[] } {
+): {
+  fetchImpl: FetchLike;
+  calls: string[];
+  requests: { url: string; init?: RequestInit }[];
+} {
   const calls: string[] = [];
+  const requests: { url: string; init?: RequestInit }[] = [];
 
-  const fetchImpl: FetchLike = async (url) => {
+  const fetchImpl: FetchLike = async (url, init) => {
     calls.push(url);
+    requests.push({ url, init });
 
     if (options.failSubstring !== undefined && url.includes(options.failSubstring)) {
       return new Response('', { status: options.failStatus ?? 429 });
@@ -261,10 +324,21 @@ function fakeFetch(
       return textResponse(fixtures.ecb ?? ecbCsv());
     }
 
+    if (url.includes('federalreserve.gov/datadownload/Output.aspx')) {
+      return new Response(fixtures.fed ?? fedCsv(), {
+        status: 200,
+        headers: { 'content-type': fixtures.fedContentType ?? 'text/csv; charset=UTF-8' },
+      });
+    }
+
+    if (url.includes('api.bls.gov/publicAPI/v2/timeseries/data/')) {
+      return jsonResponse(fixtures.bls ?? blsPayload());
+    }
+
     return new Response('not found', { status: 404 });
   };
 
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, requests };
 }
 
 function noSleep(): { sleepImpl: (ms: number) => Promise<void>; sleeps: number[] } {
@@ -429,6 +503,84 @@ async function runUnit(): Promise<void> {
   check('bce: cabeçalho divergente falha', ecbMissingHeader);
 
   check(
+    'fed: URL de backfill usa ISO e termina na sexta',
+    fedH10Url(
+      new Date('2025-01-01T00:00:00.000Z'),
+      new Date('2026-10-27T00:00:00.000Z')
+    ).includes('from=2025-01-01&to=2026-10-23')
+  );
+
+  const parsedFed = parseFedCsv(fedCsv());
+  check('fed: 5 taxas', parsedFed.rates.length === 5, `(${parsedFed.rates.length})`);
+  const fedNd = parsedFed.rates.find(
+    (rate) => formatIsoDateUtc(rate.refDate) === '2026-10-12'
+  );
+  check(
+    'fed: ND vira status nd sem valor',
+    fedNd?.status === 'nd' && fedNd.value === null
+  );
+  const fedLatest = parsedFed.rates.find(
+    (rate) => formatIsoDateUtc(rate.refDate) === '2026-10-23'
+  );
+  check(
+    'fed: valor decimal e data UTC',
+    fedLatest?.value === '121.3202' &&
+      fedLatest.refDate.toISOString() === '2026-10-23T00:00:00.000Z'
+  );
+
+  let fedMissingHeader = false;
+  try {
+    parseFedCsv(fedCsv().replace('"Time Period"', '"Date"'));
+  } catch (error) {
+    fedMissingHeader = error instanceof InvalidPayloadError;
+  }
+  check('fed: cabeçalho divergente falha', fedMissingHeader);
+
+  let fedNoData = false;
+  try {
+    parseFedCsv('"Time Period","JRXWTFB_N.B"\n');
+  } catch (error) {
+    fedNoData = error instanceof InvalidPayloadError;
+  }
+  check('fed: CSV sem dados falha', fedNoData);
+
+  const parsedBls = parseBlsPayload(blsPayload(), BLS_SERIES);
+  check(
+    'bls: 4 observações e M13 ignorado',
+    parsedBls.observations.length === 4 &&
+      !parsedBls.observations.some((observation) => observation.value === '999.999'),
+    `(${parsedBls.observations.length})`
+  );
+  check(
+    'bls: "-" omitido com aviso',
+    parsedBls.warnings.some((warning) => warning.includes('M08 valor ausente'))
+  );
+
+  const blsById = new Map(
+    parsedBls.observations.map((observation) => [observation.seriesId, observation])
+  );
+  const blsCpi = blsById.get('bls_cpi_u_sa');
+  check(
+    'bls: CPI com unidade INDEX e refDate dia 1',
+    blsCpi?.value === '336.298' &&
+      blsCpi.unit === 'INDEX' &&
+      blsCpi.refDate.toISOString() === '2026-09-01T00:00:00.000Z'
+  );
+  check(
+    'bls: unidades de desemprego e payroll',
+    blsById.get('bls_unemployment_rate')?.unit === 'PERCENT' &&
+      blsById.get('bls_nonfarm_payrolls')?.unit === 'THOUSANDS'
+  );
+
+  let blsMissingStatus = false;
+  try {
+    parseBlsPayload(blsPayload({ missingStatus: true }), BLS_SERIES);
+  } catch (error) {
+    blsMissingStatus = error instanceof InvalidPayloadError;
+  }
+  check('bls: status ausente falha', blsMissingStatus);
+
+  check(
     'publicação: tesouro 22 UTC',
     estimatePublishedAt('treasury', new Date('2026-10-23T00:00:00.000Z')).toISOString() ===
       '2026-10-23T22:00:00.000Z'
@@ -449,6 +601,26 @@ async function runUnit(): Promise<void> {
       '2026-10-27T13:00:00.000Z'
   );
   check(
+    'publicação: Fed sexta -> segunda 22 UTC',
+    estimatePublishedAt('fed', new Date('2026-10-23T00:00:00.000Z')).toISOString() ===
+      '2026-10-26T22:00:00.000Z'
+  );
+  check(
+    'publicação: Fed quinta -> segunda seguinte',
+    estimatePublishedAt('fed', new Date('2026-10-08T00:00:00.000Z')).toISOString() ===
+      '2026-10-12T22:00:00.000Z'
+  );
+  check(
+    'publicação: BLS mês seguinte 22 UTC',
+    estimatePublishedAt('bls', new Date('2026-09-01T00:00:00.000Z')).toISOString() ===
+      '2026-10-31T22:00:00.000Z'
+  );
+  check(
+    'publicação: BLS dezembro -> janeiro',
+    estimatePublishedAt('bls', new Date('2026-12-01T00:00:00.000Z')).toISOString() ===
+      '2027-01-31T22:00:00.000Z'
+  );
+  check(
     'dia útil: sábado -> segunda',
     nextBusinessDay(new Date('2026-10-24T00:00:00.000Z')).toISOString() ===
       '2026-10-26T00:00:00.000Z'
@@ -462,6 +634,7 @@ async function runUnit(): Promise<void> {
     fetchImpl: fake.fetchImpl,
     sleepImpl: pause.sleepImpl,
     now: () => FIXED_NOW_1,
+    only: ['treasury', 'nyfed', 'ecb'],
     log: (line) => dryLines.push(line),
     logError: () => {},
   });
@@ -497,6 +670,80 @@ async function runUnit(): Promise<void> {
   check(
     'dry-run: avisa ausência de escrita',
     dryLines.some((line) => line.includes('nenhuma escrita no banco'))
+  );
+
+  const fedFake = fakeFetch();
+  const fedLines: string[] = [];
+  const fedDry = await collectMacro({
+    dryRun: true,
+    only: ['fed'],
+    fetchImpl: fedFake.fetchImpl,
+    sleepImpl: noSleep().sleepImpl,
+    now: () => FIXED_NOW_1,
+    log: (line) => fedLines.push(line),
+    logError: () => {},
+  });
+  check(
+    'dry-run Fed: 5 observações e lastobs=30',
+    fedDry.ok &&
+      fedDry.observations === 5 &&
+      fedFake.calls.length === 1 &&
+      fedFake.calls[0]?.includes('lastobs=30') === true,
+    `(observations=${fedDry.observations} calls=${fedFake.calls.length})`
+  );
+  check(
+    'dry-run Fed: ND imprime valor nulo e status',
+    fedLines.some(
+      (line) =>
+        line.includes('refDate=2026-10-12') &&
+        line.includes('value=null status=nd')
+    )
+  );
+
+  const fedHtml = await collectMacro({
+    dryRun: true,
+    only: ['fed'],
+    fetchImpl: fakeFetch({ fed: '<!DOCTYPE html><html><body>erro</body></html>' })
+      .fetchImpl,
+    sleepImpl: noSleep().sleepImpl,
+    now: () => FIXED_NOW_1,
+    log: () => {},
+    logError: () => {},
+  });
+  check(
+    'dry-run Fed: HTML falha sem observações',
+    !fedHtml.ok &&
+      fedHtml.observations === 0 &&
+      fedHtml.failures.some((failure) => failure.includes('HTML'))
+  );
+
+  const blsFake = fakeFetch();
+  const blsLines: string[] = [];
+  const blsDry = await collectMacro({
+    dryRun: true,
+    only: ['bls'],
+    fetchImpl: blsFake.fetchImpl,
+    sleepImpl: noSleep().sleepImpl,
+    now: () => FIXED_NOW_1,
+    log: (line) => blsLines.push(line),
+    logError: () => {},
+  });
+  const blsBody = JSON.parse(String(blsFake.requests[0]?.init?.body)) as {
+    seriesid?: string[];
+    startyear?: string;
+    endyear?: string;
+  };
+  check(
+    'dry-run BLS: 4 observações e uma chamada',
+    blsDry.ok && blsDry.observations === 4 && blsFake.calls.length === 1,
+    `(observations=${blsDry.observations} calls=${blsFake.calls.length})`
+  );
+  check(
+    'dry-run BLS: corpo com 4 séries e anos live',
+    blsBody.seriesid?.join(',') ===
+      'CUSR0000SA0,CUSR0000SA0L1E,LNS14000000,CES0000000001' &&
+      blsBody.startyear === '2025' &&
+      blsBody.endyear === '2026'
   );
 
   const fake429 = fakeFetch({}, { failSubstring: 'secured/sofr', failStatus: 429 });
@@ -552,7 +799,7 @@ function localDbUrl(): string | null {
 
 async function cleanup(prisma: PrismaClient): Promise<void> {
   const sources = await prisma.dataSource.findMany({
-    where: { provider: { in: ['treasury', 'nyfed', 'ecb'] } },
+    where: { provider: { in: ['treasury', 'nyfed', 'ecb', 'fed', 'bls'] } },
     select: { id: true },
   });
   const ids = sources.map((source) => source.id);
@@ -562,7 +809,7 @@ async function cleanup(prisma: PrismaClient): Promise<void> {
   }
 
   await prisma.macroObservation.deleteMany({
-    where: { source: { in: ['treasury', 'nyfed', 'ecb'] } },
+    where: { source: { in: ['treasury', 'nyfed', 'ecb', 'fed', 'bls'] } },
   });
 
   if (ids.length > 0) {
@@ -582,6 +829,7 @@ async function latestObservation(
   revisionNote: string | null;
   unit: string;
   source: string;
+  status: string;
 } | null> {
   return prisma.macroObservation.findFirst({
     where: { seriesId, refDate: new Date(`${refDate}T00:00:00.000Z`) },
@@ -594,6 +842,7 @@ async function latestObservation(
       revisionNote: true,
       unit: true,
       source: true,
+      status: true,
     },
   });
 }
@@ -855,6 +1104,126 @@ async function runDb(prisma: PrismaClient, queryLog: QueryLog[]): Promise<void> 
 
   await cleanup(prisma);
 
+  const fed = await collectMacro({
+    prisma,
+    only: ['fed'],
+    backfillFrom: FED_BACKFILL_FROM,
+    fetchImpl: fakeFetch().fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_1,
+    log: () => {},
+    logError: () => {},
+  });
+  const fedNd = await latestObservation(prisma, 'fed_broad_dollar', '2026-10-12');
+  const fedLatest = await latestObservation(prisma, 'fed_broad_dollar', '2026-10-23');
+
+  check(
+    'db: Fed grava 5 incluindo ND',
+    fed.ok && fed.observations === 5 && fed.inserted === 5,
+    `(observations=${fed.observations} inserted=${fed.inserted})`
+  );
+  check(
+    'db: Fed ND fica nulo com status nd',
+    fedNd?.value === null &&
+      fedNd.status === 'nd' &&
+      fedNd.unit === 'INDEX_1973_100' &&
+      fedNd.source === 'fed'
+  );
+  check(
+    'db: Fed publicação segunda 22 UTC e nota backfill',
+    fedLatest?.publishedAt?.toISOString() === '2026-10-26T22:00:00.000Z' &&
+      fedLatest.firstSeenAt.toISOString() === '2026-10-26T22:00:00.000Z' &&
+      fedLatest.revisionNote === 'backfill:estimated_publication',
+    `(published=${fedLatest?.publishedAt?.toISOString()})`
+  );
+
+  queryLog.length = 0;
+  const fedAgain = await collectMacro({
+    prisma,
+    only: ['fed'],
+    backfillFrom: FED_BACKFILL_FROM,
+    fetchImpl: fakeFetch().fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_2,
+    log: () => {},
+    logError: () => {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  check(
+    'db: Fed igual compara status e valor nulo',
+    fedAgain.ok && fedAgain.inserted === 0 && fedAgain.unchanged === 5,
+    `(inserted=${fedAgain.inserted} unchanged=${fedAgain.unchanged})`
+  );
+  check(
+    'db: Fed faz uma leitura por série',
+    macroQueries(queryLog, 'select').length === 1,
+    `(${macroQueries(queryLog, 'select').length})`
+  );
+
+  await cleanup(prisma);
+
+  const bls = await collectMacro({
+    prisma,
+    only: ['bls'],
+    backfillFrom: BLS_BACKFILL_FROM,
+    fetchImpl: fakeFetch().fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_1,
+    log: () => {},
+    logError: () => {},
+  });
+  const blsCpi = await latestObservation(prisma, 'bls_cpi_u_sa', '2026-09-01');
+  const blsPayroll = await latestObservation(
+    prisma,
+    'bls_nonfarm_payrolls',
+    '2026-09-01'
+  );
+  const blsCpiRows = await prisma.macroObservation.count({
+    where: { seriesId: 'bls_cpi_u_sa' },
+  });
+
+  check(
+    'db: BLS grava 4 e omite M13/ausente',
+    bls.ok &&
+      bls.observations === 4 &&
+      bls.inserted === 4 &&
+      blsCpiRows === 1 &&
+      bls.warnings.some((warning) => warning.includes('M08 valor ausente')),
+    `(observations=${bls.observations} rows=${blsCpiRows})`
+  );
+  check(
+    'db: BLS CPI unidade, publicação e nota latest_vintage',
+    blsCpi?.value?.toString() === '336.298' &&
+      blsCpi.unit === 'INDEX' &&
+      blsCpi.status === 'ok' &&
+      blsCpi.publishedAt?.toISOString() === '2026-10-31T22:00:00.000Z' &&
+      blsCpi.revisionNote === 'backfill:estimated_publication;latest_vintage',
+    `(published=${blsCpi?.publishedAt?.toISOString()})`
+  );
+  check(
+    'db: BLS payroll em milhares',
+    blsPayroll?.value?.toString() === '159044' &&
+      blsPayroll.unit === 'THOUSANDS'
+  );
+
+  const blsAgain = await collectMacro({
+    prisma,
+    only: ['bls'],
+    backfillFrom: BLS_BACKFILL_FROM,
+    fetchImpl: fakeFetch().fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_2,
+    log: () => {},
+    logError: () => {},
+  });
+  check(
+    'db: BLS igual não grava novamente',
+    blsAgain.ok && blsAgain.inserted === 0 && blsAgain.unchanged === 4,
+    `(inserted=${blsAgain.inserted} unchanged=${blsAgain.unchanged})`
+  );
+
+  await cleanup(prisma);
+
   const fake429 = fakeFetch({}, { failSubstring: 'secured/sofr', failStatus: 429 });
   const limited = await collectMacro({
     prisma,
@@ -1010,6 +1379,7 @@ async function runDb(prisma: PrismaClient, queryLog: QueryLog[]): Promise<void> 
     fetchImpl: fakeFetch().fetchImpl,
     sleepImpl: async () => {},
     now: () => FIXED_NOW_1,
+    only: ['treasury', 'nyfed', 'ecb'],
     log: (line) => dryLines.push(line),
     logError: () => {},
   });

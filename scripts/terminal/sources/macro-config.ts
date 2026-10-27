@@ -1,10 +1,15 @@
-export const MACRO_AVAILABILITY_RULES_VERSION = 'macro_availability_v1';
+export const MACRO_AVAILABILITY_RULES_VERSION = 'macro_availability_v2';
 export const MACRO_DEFAULT_LOOKBACK_DAYS = 10;
 export const MACRO_REQUEST_TIMEOUT_MS = 15_000;
 export const MACRO_REQUEST_PAUSE_MS = 3_000;
 
-export type MacroSource = 'treasury' | 'nyfed' | 'ecb';
-export type MacroUnit = 'PERCENT' | 'USD_PER_EUR';
+export type MacroSource = 'treasury' | 'nyfed' | 'ecb' | 'fed' | 'bls';
+export type MacroUnit =
+  | 'PERCENT'
+  | 'USD_PER_EUR'
+  | 'INDEX_1973_100'
+  | 'INDEX'
+  | 'THOUSANDS';
 export type TreasuryCurve = 'nominal' | 'real';
 export type NyfedRateType = 'sofr' | 'effr';
 
@@ -30,9 +35,25 @@ export const MACRO_SOURCE_INFO: Record<MacroSource, MacroSourceInfo> = {
     displayName: 'European Central Bank',
     baseUrl: 'https://data-api.ecb.europa.eu',
   },
+  fed: {
+    provider: 'fed',
+    displayName: 'Federal Reserve Board H.10',
+    baseUrl: 'https://www.federalreserve.gov',
+  },
+  bls: {
+    provider: 'bls',
+    displayName: 'U.S. Bureau of Labor Statistics',
+    baseUrl: 'https://api.bls.gov',
+  },
 };
 
-export const MACRO_SOURCES: readonly MacroSource[] = ['treasury', 'nyfed', 'ecb'];
+export const MACRO_SOURCES: readonly MacroSource[] = [
+  'treasury',
+  'nyfed',
+  'ecb',
+  'fed',
+  'bls',
+];
 
 interface MacroSeriesBase {
   seriesId: string;
@@ -56,10 +77,21 @@ export interface EcbSeriesDefinition extends MacroSeriesBase {
   source: 'ecb';
 }
 
+export interface FedSeriesDefinition extends MacroSeriesBase {
+  source: 'fed';
+}
+
+export interface BlsSeriesDefinition extends MacroSeriesBase {
+  source: 'bls';
+  apiSeriesId: string;
+}
+
 export type MacroSeriesDefinition =
   | TreasurySeriesDefinition
   | NyfedSeriesDefinition
-  | EcbSeriesDefinition;
+  | EcbSeriesDefinition
+  | FedSeriesDefinition
+  | BlsSeriesDefinition;
 
 export const MACRO_SERIES: readonly MacroSeriesDefinition[] = [
   {
@@ -138,6 +170,40 @@ export const MACRO_SERIES: readonly MacroSeriesDefinition[] = [
     unit: 'USD_PER_EUR',
     label: 'ECB EUR/USD reference rate',
   },
+  {
+    seriesId: 'fed_broad_dollar',
+    source: 'fed',
+    unit: 'INDEX_1973_100',
+    label: 'Fed H.10 Nominal Broad Dollar Index',
+  },
+  {
+    seriesId: 'bls_cpi_u_sa',
+    source: 'bls',
+    unit: 'INDEX',
+    label: 'BLS CPI-U seasonally adjusted',
+    apiSeriesId: 'CUSR0000SA0',
+  },
+  {
+    seriesId: 'bls_core_cpi_sa',
+    source: 'bls',
+    unit: 'INDEX',
+    label: 'BLS core CPI seasonally adjusted',
+    apiSeriesId: 'CUSR0000SA0L1E',
+  },
+  {
+    seriesId: 'bls_unemployment_rate',
+    source: 'bls',
+    unit: 'PERCENT',
+    label: 'BLS unemployment rate',
+    apiSeriesId: 'LNS14000000',
+  },
+  {
+    seriesId: 'bls_nonfarm_payrolls',
+    source: 'bls',
+    unit: 'THOUSANDS',
+    label: 'BLS total nonfarm payrolls',
+    apiSeriesId: 'CES0000000001',
+  },
 ];
 
 export interface MacroObservationValue {
@@ -145,7 +211,8 @@ export interface MacroObservationValue {
   source: MacroSource;
   unit: MacroUnit;
   refDate: Date;
-  value: string;
+  value: string | null;
+  status?: 'ok' | 'nd';
   revisionIndicator: string | null;
 }
 
@@ -177,9 +244,23 @@ export interface MacroHttpOptions {
   pauseMs?: number;
 }
 
+export interface MacroTextResponse {
+  text: string;
+  contentType: string | null;
+}
+
 export interface MacroHttpClient {
   getText(url: string, accept: string): Promise<string>;
+  getTextWithMetadata(url: string, accept: string): Promise<MacroTextResponse>;
   getJson(url: string): Promise<unknown>;
+  postJson(url: string, payload: unknown): Promise<unknown>;
+}
+
+interface MacroRequestOptions {
+  method?: 'GET' | 'POST';
+  accept: string;
+  contentType?: string;
+  body?: string;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -193,7 +274,7 @@ export function createMacroHttpClient(options: MacroHttpOptions = {}): MacroHttp
   const pauseMs = options.pauseMs ?? MACRO_REQUEST_PAUSE_MS;
   let calls = 0;
 
-  async function request(url: string, accept: string): Promise<Response> {
+  async function request(url: string, requestOptions: MacroRequestOptions): Promise<Response> {
     if (calls > 0) {
       await sleepImpl(pauseMs);
     }
@@ -201,10 +282,17 @@ export function createMacroHttpClient(options: MacroHttpOptions = {}): MacroHttp
     calls++;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const headers: Record<string, string> = { Accept: requestOptions.accept };
+
+    if (requestOptions.contentType !== undefined) {
+      headers['Content-Type'] = requestOptions.contentType;
+    }
 
     try {
       const response = await fetchImpl(url, {
-        headers: { Accept: accept },
+        method: requestOptions.method ?? 'GET',
+        headers,
+        body: requestOptions.body,
         signal: controller.signal,
       });
 
@@ -224,22 +312,38 @@ export function createMacroHttpClient(options: MacroHttpOptions = {}): MacroHttp
     }
   }
 
+  async function readJson(response: Response): Promise<unknown> {
+    try {
+      return await response.json();
+    } catch {
+      throw new InvalidPayloadError('resposta da API não é JSON válido');
+    }
+  }
+
   return {
     async getText(url, accept) {
-      const response = await request(url, accept);
+      const response = await request(url, { accept });
       return response.text();
     },
+    async getTextWithMetadata(url, accept) {
+      const response = await request(url, { accept });
+      return {
+        text: await response.text(),
+        contentType: response.headers.get('content-type'),
+      };
+    },
     async getJson(url) {
-      const response = await request(url, 'application/json');
-      let payload: unknown;
-
-      try {
-        payload = await response.json();
-      } catch {
-        throw new InvalidPayloadError('resposta da API não é JSON válido');
-      }
-
-      return payload;
+      const response = await request(url, { accept: 'application/json' });
+      return readJson(response);
+    },
+    async postJson(url, payload) {
+      const response = await request(url, {
+        method: 'POST',
+        accept: 'application/json',
+        contentType: 'application/json',
+        body: JSON.stringify(payload),
+      });
+      return readJson(response);
     },
   };
 }
@@ -390,11 +494,42 @@ export function estimatePublishedAt(source: MacroSource, refDate: Date): Date {
     );
   }
 
-  const day = nextBusinessDay(refDate);
+  if (source === 'nyfed') {
+    const day = nextBusinessDay(refDate);
 
-  return new Date(
-    Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), 13, 0, 0)
+    return new Date(
+      Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), 13, 0, 0)
+    );
+  }
+
+  if (source === 'fed') {
+    const daysSinceMonday = (refDate.getUTCDay() + 6) % 7;
+    const nextMonday = addUtcDays(refDate, -daysSinceMonday + 7);
+
+    return new Date(
+      Date.UTC(
+        nextMonday.getUTCFullYear(),
+        nextMonday.getUTCMonth(),
+        nextMonday.getUTCDate(),
+        22,
+        0,
+        0
+      )
+    );
+  }
+
+  const followingMonthLastDay = new Date(
+    Date.UTC(
+      refDate.getUTCFullYear(),
+      refDate.getUTCMonth() + 2,
+      0,
+      22,
+      0,
+      0
+    )
   );
+
+  return followingMonthLastDay;
 }
 
 const DECIMAL_PATTERN = /^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;

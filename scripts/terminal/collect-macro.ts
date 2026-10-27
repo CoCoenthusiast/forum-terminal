@@ -17,7 +17,9 @@ import {
   formatIsoDateUtc,
   parseIsoDateUtc,
   startOfUtcDay,
+  type BlsSeriesDefinition,
   type EcbSeriesDefinition,
+  type FedSeriesDefinition,
   type MacroFetchResult,
   type MacroHttpClient,
   type MacroObservationValue,
@@ -33,19 +35,25 @@ import {
 } from './sources/macro-treasury';
 import { NYFED_ENDPOINT, fetchNyfedObservations } from './sources/macro-nyfed';
 import { ECB_ENDPOINT, fetchEcbObservations } from './sources/macro-ecb';
+import { FED_H10_ENDPOINT, fetchFedObservations } from './sources/macro-fed';
+import { BLS_ENDPOINT, fetchBlsObservations } from './sources/macro-bls';
 
-const SOURCE_ORDER: readonly MacroSource[] = ['treasury', 'nyfed', 'ecb'];
+const SOURCE_ORDER: readonly MacroSource[] = ['treasury', 'nyfed', 'ecb', 'fed', 'bls'];
 
 const OPERATION_BY_SOURCE: Record<MacroSource, string> = {
   treasury: 'fetch_treasury_rates',
   nyfed: 'fetch_nyfed_rates',
   ecb: 'fetch_ecb_rates',
+  fed: 'fetch_fed_h10',
+  bls: 'fetch_bls_series',
 };
 
 const ENDPOINT_BY_SOURCE: Record<MacroSource, string> = {
   treasury: TREASURY_ENDPOINT,
   nyfed: NYFED_ENDPOINT,
   ecb: ECB_ENDPOINT,
+  fed: FED_H10_ENDPOINT,
+  bls: BLS_ENDPOINT,
 };
 
 interface LogData {
@@ -61,6 +69,7 @@ interface LogData {
 
 interface LatestObservation {
   value: Decimal | null;
+  status: string;
   firstSeenAt: Date;
 }
 
@@ -68,7 +77,7 @@ interface InsertRow {
   seriesId: string;
   source: string;
   refDate: Date;
-  value: Decimal;
+  value: Decimal | null;
   status: string;
   unit: string;
   publishedAt: Date | null;
@@ -195,7 +204,8 @@ async function fetchSource(
   source: MacroSource,
   series: readonly MacroSeriesDefinition[],
   startDate: Date,
-  endDate: Date
+  endDate: Date,
+  isBackfill: boolean
 ): Promise<MacroFetchResult> {
   if (source === 'treasury') {
     const definitions = series.filter(
@@ -211,10 +221,24 @@ async function fetchSource(
     return fetchNyfedObservations(http, definitions, startDate, endDate);
   }
 
+  if (source === 'ecb') {
+    const definitions = series.filter(
+      (definition): definition is EcbSeriesDefinition => definition.source === 'ecb'
+    );
+    return fetchEcbObservations(http, definitions, startDate, endDate);
+  }
+
+  if (source === 'fed') {
+    const definitions = series.filter(
+      (definition): definition is FedSeriesDefinition => definition.source === 'fed'
+    );
+    return fetchFedObservations(http, definitions, startDate, endDate, isBackfill);
+  }
+
   const definitions = series.filter(
-    (definition): definition is EcbSeriesDefinition => definition.source === 'ecb'
+    (definition): definition is BlsSeriesDefinition => definition.source === 'bls'
   );
-  return fetchEcbObservations(http, definitions, startDate, endDate);
+  return fetchBlsObservations(http, definitions, startDate, endDate, isBackfill);
 }
 
 function dedupeObservations(
@@ -259,6 +283,7 @@ async function readLatestByRefDate(
     select: {
       refDate: true,
       value: true,
+      status: true,
       firstSeenAt: true,
     },
   });
@@ -268,7 +293,11 @@ async function readLatestByRefDate(
     const key = formatIsoDateUtc(row.refDate);
 
     if (!latest.has(key)) {
-      latest.set(key, { value: row.value, firstSeenAt: row.firstSeenAt });
+      latest.set(key, {
+        value: row.value,
+        status: row.status,
+        firstSeenAt: row.firstSeenAt,
+      });
     }
   }
 
@@ -294,9 +323,18 @@ async function persistSeries(
 
   for (const observation of observations) {
     const latest = existing.latest.get(formatIsoDateUtc(observation.refDate));
-    const value = new Decimal(observation.value);
+    const status = observation.status ?? 'ok';
+    const value =
+      observation.value === null ? null : new Decimal(observation.value);
+    const sameValue =
+      latest !== undefined &&
+      latest.status === status &&
+      ((latest.value === null && value === null) ||
+        (latest.value !== null &&
+          value !== null &&
+          latest.value.equals(value)));
 
-    if (latest !== undefined && latest.value !== null && latest.value.equals(value)) {
+    if (sameValue) {
       equal++;
       continue;
     }
@@ -307,12 +345,18 @@ async function persistSeries(
     const notes: string[] = [];
 
     if (isBackfill) {
-      notes.push('backfill:estimated_publication');
+      notes.push(
+        observation.source === 'bls'
+          ? 'backfill:estimated_publication;latest_vintage'
+          : 'backfill:estimated_publication'
+      );
     }
 
     if (latest !== undefined) {
       revised++;
-      notes.push(`revised from ${latest.value?.toString() ?? 'null'}`);
+      notes.push(
+        `revised from ${latest.value?.toString() ?? latest.status}`
+      );
     }
 
     if (observation.revisionIndicator !== null) {
@@ -324,7 +368,7 @@ async function persistSeries(
       source: observation.source,
       refDate: observation.refDate,
       value,
-      status: 'ok',
+      status,
       unit: observation.unit,
       publishedAt,
       firstSeenAt,
@@ -431,7 +475,7 @@ function printDryRun(
     for (const row of rows.slice(0, 3)) {
       log(
         `[DRY-RUN]   series=${row.seriesId} refDate=${formatIsoDateUtc(row.refDate)} ` +
-          `value=${row.value}`
+          `value=${row.value ?? 'null'} status=${row.status ?? 'ok'}`
       );
     }
   }
@@ -519,7 +563,14 @@ export async function collectMacro(
     const started = Date.now();
 
     try {
-      const result = await fetchSource(http, source, series, startDate, endDate);
+      const result = await fetchSource(
+        http,
+        source,
+        series,
+        startDate,
+        endDate,
+        isBackfill
+      );
       const deduped = dedupeObservations(result.observations);
       observations.push(...deduped);
       warnings.push(...result.warnings);
