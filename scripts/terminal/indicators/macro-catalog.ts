@@ -27,6 +27,10 @@ import {
 
 export { MACRO_STALE_DAYS_DAILY, MACRO_STALE_DAYS_FED };
 
+// Hipótese, versionada: identifica a primeira geração persistida dos 13
+// indicadores macro. Mudanças futuras de fórmula devem criar uma versão nova.
+export const MACRO_INDICATOR_FORMULA_VERSION = 'macro_v1';
+
 // Hipótese, versionada: a refDate mensal é o dia 1. A publicação estimada é o
 // fim do mês seguinte, então o dado mais novo conhecido tem de 60 a 91 dias.
 // O limite de 105 dias evita marcar como stale durante a janela normal de
