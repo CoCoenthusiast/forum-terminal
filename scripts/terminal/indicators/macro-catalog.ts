@@ -9,28 +9,29 @@ import {
 import {
   MACRO_STALE_DAYS_DAILY,
   MACRO_STALE_DAYS_FED,
-  MACRO_STALE_DAYS_MONTHLY,
   macro_breakeven_10y,
   macro_breakeven_5y,
-  macro_core_cpi_yoy_pct,
-  macro_cpi_yoy_pct,
+  macro_core_cpi_yoy_pct as computeCoreCpiYoyPct,
+  macro_cpi_yoy_pct as computeCpiYoyPct,
   macro_dollar_broad_change_5d_pct,
   macro_eurusd_change_5d_pct,
-  macro_payrolls_change_1m,
+  macro_payrolls_change_1m as computePayrollsChange1m,
   macro_real_yield_10y_change_5d,
   macro_sofr_effr_spread,
-  macro_unemployment_change_3m,
+  macro_unemployment_change_3m as computeUnemploymentChange3m,
   macro_ust_2s10s_spread,
   macro_ust_2y_change_5d,
   macro_ust_10y_change_5d,
   type MacroIndicatorResult,
 } from './macro-formulas';
 
-export {
-  MACRO_STALE_DAYS_DAILY,
-  MACRO_STALE_DAYS_FED,
-  MACRO_STALE_DAYS_MONTHLY,
-};
+export { MACRO_STALE_DAYS_DAILY, MACRO_STALE_DAYS_FED };
+
+// Hipótese, versionada: a refDate mensal é o dia 1. A publicação estimada é o
+// fim do mês seguinte, então o dado mais novo conhecido tem de 60 a 91 dias.
+// O limite de 105 dias evita marcar como stale durante a janela normal de
+// publicação e ainda detecta uma série mensal realmente atrasada.
+export const MACRO_STALE_DAYS_MONTHLY = 105;
 
 export const MACRO_INDICATOR_SERIES_IDS = [
   'ust_nominal_2y',
@@ -52,6 +53,58 @@ export interface MacroIndicatorDefinition {
   indicator: string;
   inputs: readonly string[];
   compute: (series: MacroSeriesMap, asOf: string) => MacroIndicatorResult;
+}
+
+function applyMonthlyStaleLimit(result: MacroIndicatorResult): MacroIndicatorResult {
+  const ageDays = result.evidence.latestAgeDays;
+
+  if (result.value === null || ageDays === null) {
+    return result;
+  }
+
+  if (ageDays > MACRO_STALE_DAYS_MONTHLY) {
+    return {
+      ...result,
+      status: 'stale',
+      reason:
+        `dado mais recente ${result.evidence.latestRefDate} tem ${ageDays} dias ` +
+        `(limite ${MACRO_STALE_DAYS_MONTHLY})`,
+    };
+  }
+
+  if (result.status === 'stale') {
+    return { ...result, status: 'ok', reason: null };
+  }
+
+  return result;
+}
+
+export function macro_cpi_yoy_pct(
+  series: MacroSeriesMap,
+  asOf: string
+): MacroIndicatorResult {
+  return applyMonthlyStaleLimit(computeCpiYoyPct(series, asOf));
+}
+
+export function macro_core_cpi_yoy_pct(
+  series: MacroSeriesMap,
+  asOf: string
+): MacroIndicatorResult {
+  return applyMonthlyStaleLimit(computeCoreCpiYoyPct(series, asOf));
+}
+
+export function macro_unemployment_change_3m(
+  series: MacroSeriesMap,
+  asOf: string
+): MacroIndicatorResult {
+  return applyMonthlyStaleLimit(computeUnemploymentChange3m(series, asOf));
+}
+
+export function macro_payrolls_change_1m(
+  series: MacroSeriesMap,
+  asOf: string
+): MacroIndicatorResult {
+  return applyMonthlyStaleLimit(computePayrollsChange1m(series, asOf));
 }
 
 export const MACRO_INDICATORS: MacroIndicatorDefinition[] = [

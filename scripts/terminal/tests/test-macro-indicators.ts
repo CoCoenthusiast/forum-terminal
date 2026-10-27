@@ -14,14 +14,10 @@ import {
 import {
   macro_breakeven_10y,
   macro_breakeven_5y,
-  macro_core_cpi_yoy_pct,
-  macro_cpi_yoy_pct,
   macro_dollar_broad_change_5d_pct,
   macro_eurusd_change_5d_pct,
-  macro_payrolls_change_1m,
   macro_real_yield_10y_change_5d,
   macro_sofr_effr_spread,
-  macro_unemployment_change_3m,
   macro_ust_2s10s_spread,
   macro_ust_2y_change_5d,
   macro_ust_10y_change_5d,
@@ -33,6 +29,10 @@ import {
   MACRO_STALE_DAYS_FED,
   MACRO_STALE_DAYS_MONTHLY,
   computeMacroIndicators,
+  macro_core_cpi_yoy_pct,
+  macro_cpi_yoy_pct,
+  macro_payrolls_change_1m,
+  macro_unemployment_change_3m,
   parseMacroReportArgs,
 } from '../indicators/macro-catalog';
 
@@ -301,18 +301,56 @@ function runPureTests(): void {
     macro_dollar_broad_change_5d_pct(fedStale, '2026-10-26').status === 'stale'
   );
 
-  const staleMonthly = map({
+  const monthlyBoundary = map({
+    ...daily,
+    bls_cpi_u_sa: monthly([
+      ['2025-07', '290'],
+      ['2026-07', '300'],
+    ]),
+  });
+  const at105 = macro_cpi_yoy_pct(monthlyBoundary, '2026-10-14');
+  const at106 = macro_cpi_yoy_pct(monthlyBoundary, '2026-10-15');
+  check(
+    `mensal com ${MACRO_STALE_DAYS_MONTHLY} dias é ok`,
+    at105.status === 'ok' && at105.evidence.latestAgeDays === 105
+  );
+  check(
+    `mensal com ${MACRO_STALE_DAYS_MONTHLY + 1} dias fica stale`,
+    at106.status === 'stale' &&
+      at106.evidence.latestAgeDays === 106 &&
+      (at106.reason?.includes(`limite ${MACRO_STALE_DAYS_MONTHLY}`) ?? false)
+  );
+
+  const monthlyAge86 = map({
     ...daily,
     bls_cpi_u_sa: monthly([
       ['2025-08', '290'],
       ['2026-08', '300'],
     ]),
+    bls_core_cpi_sa: monthly([
+      ['2025-08', '290'],
+      ['2026-08', '300'],
+    ]),
+    bls_unemployment_rate: monthly([
+      ['2026-05', '4.0'],
+      ['2026-08', '4.2'],
+    ]),
+    bls_nonfarm_payrolls: monthly([
+      ['2026-07', '159000'],
+      ['2026-08', '159029'],
+    ]),
   });
-  const staleMonthlyResult = macro_cpi_yoy_pct(staleMonthly, cpiAsOf);
+  const monthlyAge86Results = [
+    macro_cpi_yoy_pct(monthlyAge86, cpiAsOf),
+    macro_core_cpi_yoy_pct(monthlyAge86, cpiAsOf),
+    macro_unemployment_change_3m(monthlyAge86, cpiAsOf),
+    macro_payrolls_change_1m(monthlyAge86, cpiAsOf),
+  ];
   check(
-    `mensal com mais de ${MACRO_STALE_DAYS_MONTHLY} dias fica stale`,
-    staleMonthlyResult.status === 'stale' &&
-      staleMonthlyResult.evidence.latestAgeDays === 86
+    'mensais com 86 dias não ficam stale em 2026-10-26',
+    monthlyAge86Results.every(
+      (result) => result.status === 'ok' && result.evidence.latestAgeDays === 86
+    )
   );
 
   const reportOptions = parseMacroReportArgs(
