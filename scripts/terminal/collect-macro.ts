@@ -310,12 +310,33 @@ async function persistSeries(
   observations: readonly MacroObservationValue[],
   collectedAt: Date,
   isBackfill: boolean,
-  startDate: Date,
-  endDate: Date,
+  fallbackStartDate: Date,
+  fallbackEndDate: Date,
   log: (message: string) => void
 ): Promise<{ inserted: number; unchanged: number }> {
-  const existing = await readLatestByRefDate(prisma, seriesId, startDate, endDate);
-  log(`[MACRO] série=${seriesId} lidas=${existing.rowsRead}`);
+  let readStartDate = fallbackStartDate;
+  let readEndDate = fallbackEndDate;
+
+  if (observations.length > 0) {
+    readStartDate = observations[0].refDate;
+    readEndDate = observations[0].refDate;
+
+    for (const observation of observations) {
+      if (observation.refDate < readStartDate) readStartDate = observation.refDate;
+      if (observation.refDate > readEndDate) readEndDate = observation.refDate;
+    }
+  }
+
+  const existing = await readLatestByRefDate(
+    prisma,
+    seriesId,
+    readStartDate,
+    readEndDate
+  );
+  log(
+    `[MACRO] série=${seriesId} lidas=${existing.rowsRead} ` +
+      `intervalo=${formatIsoDateUtc(readStartDate)}..${formatIsoDateUtc(readEndDate)}`
+  );
 
   const rows: InsertRow[] = [];
   let equal = 0;
@@ -375,6 +396,18 @@ async function persistSeries(
       collectedAt,
       revisionNote: notes.length > 0 ? notes.join('; ') : null,
     });
+  }
+
+  const outsideReadRange = rows.find(
+    (row) => row.refDate < readStartDate || row.refDate > readEndDate
+  );
+
+  if (outsideReadRange !== undefined) {
+    throw new MacroPersistenceError(
+      seriesId,
+      `série=${seriesId} refDate=${formatIsoDateUtc(outsideReadRange.refDate)} ` +
+        `fora do intervalo lido ${formatIsoDateUtc(readStartDate)}..${formatIsoDateUtc(readEndDate)}`
+    );
   }
 
   const batchCount = Math.ceil(rows.length / INSERT_BATCH_SIZE);

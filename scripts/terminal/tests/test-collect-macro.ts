@@ -2,6 +2,7 @@
 
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/db/client';
+import { Decimal } from '../prisma-types';
 import { collectMacro, parseMacroArgs } from '../collect-macro';
 import {
   InvalidPayloadError,
@@ -269,6 +270,122 @@ function blsPayload(options: { missingStatus?: boolean } = {}): unknown {
       ],
     },
   };
+}
+
+interface FedHistoryRow {
+  refDate: Date;
+  value: string;
+  status: 'ok';
+}
+
+function fedHistoryRows(count = 30, startOffsetDays = -40): FedHistoryRow[] {
+  const start = addUtcDays(startOfUtcDay(FIXED_NOW_1), startOffsetDays);
+
+  return Array.from({ length: count }, (_, index) => ({
+    refDate: addUtcDays(start, index),
+    value: (120 + index / 100).toFixed(4),
+    status: 'ok' as const,
+  }));
+}
+
+function fedCsvFromRows(rows: readonly FedHistoryRow[]): string {
+  return [
+    '"Series Description","Nominal Broad Dollar Index","Nominal Major Currencies Dollar Index"',
+    '"Unit:","Index:_1997_Jan_100","Index:_1997_Jan_100"',
+    '"Time Period","JRXWTFB_N.B","JRXWTFN_N.B","JRXWTFO_N.B"',
+    ...rows.map(
+      (row) => `${formatIsoDateUtc(row.refDate)},${row.value},120.0,120.0`
+    ),
+  ].join('\n');
+}
+
+function blsMonth(index: number): { year: string; period: string } {
+  const year = 2025 + Math.floor(index / 12);
+  const month = (index % 12) + 1;
+  return { year: String(year), period: `M${String(month).padStart(2, '0')}` };
+}
+
+function blsHistoricalPayload(): unknown {
+  const specs = [
+    {
+      seriesID: 'CUSR0000SA0',
+      count: 21,
+      value: (index: number) => (300 + index / 10).toFixed(3),
+    },
+    {
+      seriesID: 'CUSR0000SA0L1E',
+      count: 21,
+      value: (index: number) => (310 + index / 10).toFixed(3),
+    },
+    {
+      seriesID: 'LNS14000000',
+      count: 21,
+      value: (index: number) => (4 + index / 100).toFixed(2),
+    },
+    {
+      seriesID: 'CES0000000001',
+      count: 18,
+      value: (index: number) => String(150000 + index * 100),
+    },
+  ];
+
+  return {
+    status: 'REQUEST_SUCCEEDED',
+    responseTime: 0,
+    message: [],
+    Results: {
+      series: specs.map((spec) => ({
+        seriesID: spec.seriesID,
+        data: Array.from({ length: spec.count }, (_, index) => ({
+          ...blsMonth(index),
+          value: spec.value(index),
+        })),
+      })),
+    },
+  };
+}
+
+function fedSeedRows(rows: readonly FedHistoryRow[]) {
+  return rows.map((row) => ({
+    seriesId: 'fed_broad_dollar',
+    source: 'fed',
+    unit: 'INDEX_1973_100',
+    refDate: row.refDate,
+    value: row.value,
+    status: row.status,
+  }));
+}
+
+interface MacroSeedObservation {
+  seriesId: string;
+  source: string;
+  unit: string;
+  refDate: Date;
+  value: string | null;
+  status?: string;
+}
+
+async function seedMacroObservations(
+  prisma: PrismaClient,
+  observations: readonly MacroSeedObservation[],
+  collectedAt: Date
+): Promise<void> {
+  if (observations.length === 0) return;
+
+  await prisma.macroObservation.createMany({
+    data: observations.map((observation) => ({
+      seriesId: observation.seriesId,
+      source: observation.source,
+      refDate: observation.refDate,
+      value: observation.value === null ? null : new Decimal(observation.value),
+      status: observation.status ?? 'ok',
+      unit: observation.unit,
+      publishedAt: null,
+      firstSeenAt: collectedAt,
+      collectedAt,
+      revisionNote: null,
+    })),
+  });
 }
 
 function textResponse(body: string): Response {
@@ -1220,6 +1337,172 @@ async function runDb(prisma: PrismaClient, queryLog: QueryLog[]): Promise<void> 
     'db: BLS igual não grava novamente',
     blsAgain.ok && blsAgain.inserted === 0 && blsAgain.unchanged === 4,
     `(inserted=${blsAgain.inserted} unchanged=${blsAgain.unchanged})`
+  );
+
+  await cleanup(prisma);
+
+  const blsHistorical = blsHistoricalPayload();
+  const parsedBlsHistorical = parseBlsPayload(blsHistorical, BLS_SERIES);
+  const oldBlsCollectedAt = new Date('2026-05-15T12:00:00.000Z');
+  await seedMacroObservations(
+    prisma,
+    parsedBlsHistorical.observations,
+    oldBlsCollectedAt
+  );
+  check(
+    'db: fixture BLS histórica tem 81 observações',
+    parsedBlsHistorical.observations.length === 81,
+    `(${parsedBlsHistorical.observations.length})`
+  );
+
+  queryLog.length = 0;
+  const blsLive = await collectMacro({
+    prisma,
+    only: ['bls'],
+    fetchImpl: fakeFetch({ bls: blsHistorical }).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_1,
+    log: () => {},
+    logError: () => {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const blsLiveSelects = macroQueries(queryLog, 'select');
+  const blsLiveRows = await prisma.macroObservation.count({ where: { source: 'bls' } });
+
+  check(
+    'db: BLS live com 81 antigas e janela de 10 dias não grava',
+    blsLive.ok &&
+      blsLive.observations === 81 &&
+      blsLive.inserted === 0 &&
+      blsLive.unchanged === 81,
+    `(inserted=${blsLive.inserted} unchanged=${blsLive.unchanged})`
+  );
+  check('db: BLS live não duplica as 81', blsLiveRows === 81, `(${blsLiveRows})`);
+  check(
+    'db: BLS live faz uma leitura por série',
+    blsLiveSelects.length === 4 &&
+      queriesForSeries(blsLiveSelects, 'bls_cpi_u_sa') === 1 &&
+      queriesForSeries(blsLiveSelects, 'bls_core_cpi_sa') === 1 &&
+      queriesForSeries(blsLiveSelects, 'bls_unemployment_rate') === 1 &&
+      queriesForSeries(blsLiveSelects, 'bls_nonfarm_payrolls') === 1,
+    `(selects=${blsLiveSelects.length})`
+  );
+
+  await cleanup(prisma);
+
+  const fedRows = fedHistoryRows();
+  const oldFedCollectedAt = new Date('2026-09-01T12:00:00.000Z');
+  await seedMacroObservations(prisma, fedSeedRows(fedRows), oldFedCollectedAt);
+
+  queryLog.length = 0;
+  const fedLive = await collectMacro({
+    prisma,
+    only: ['fed'],
+    fetchImpl: fakeFetch({ fed: fedCsvFromRows(fedRows) }).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_1,
+    log: () => {},
+    logError: () => {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fedLiveSelects = macroQueries(queryLog, 'select');
+
+  check(
+    'db: Fed live com linhas de até 40 dias atrás não grava',
+    fedLive.ok &&
+      fedLive.observations === 30 &&
+      fedLive.inserted === 0 &&
+      fedLive.unchanged === 30,
+    `(inserted=${fedLive.inserted} unchanged=${fedLive.unchanged})`
+  );
+  check(
+    'db: Fed live antigo faz uma leitura por série',
+    fedLiveSelects.length === 1,
+    `(selects=${fedLiveSelects.length})`
+  );
+
+  await cleanup(prisma);
+
+  const missingIndex = 10;
+  await seedMacroObservations(
+    prisma,
+    fedSeedRows(fedRows.filter((_, index) => index !== missingIndex)),
+    oldFedCollectedAt
+  );
+
+  queryLog.length = 0;
+  const fedNewMiddle = await collectMacro({
+    prisma,
+    only: ['fed'],
+    fetchImpl: fakeFetch({ fed: fedCsvFromRows(fedRows) }).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_2,
+    log: () => {},
+    logError: () => {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fedNewMiddleSelects = macroQueries(queryLog, 'select');
+  const insertedMiddleDate = formatIsoDateUtc(fedRows[missingIndex].refDate);
+  const insertedMiddle = await latestObservation(
+    prisma,
+    'fed_broad_dollar',
+    insertedMiddleDate
+  );
+
+  check(
+    'db: observação nova no meio de dados antigos é gravada',
+    fedNewMiddle.ok &&
+      fedNewMiddle.inserted === 1 &&
+      fedNewMiddle.unchanged === 29 &&
+      insertedMiddle?.value?.toString() === '120.1',
+    `(inserted=${fedNewMiddle.inserted} middle=${insertedMiddle?.value?.toString()})`
+  );
+  check(
+    'db: observação nova no meio faz uma leitura por série',
+    fedNewMiddleSelects.length === 1,
+    `(selects=${fedNewMiddleSelects.length})`
+  );
+
+  await cleanup(prisma);
+
+  const revisionIndex = 0;
+  const revisedFedRows = fedRows.map((row, index) =>
+    index === revisionIndex ? { ...row, value: '999.9999' } : row
+  );
+  await seedMacroObservations(prisma, fedSeedRows(fedRows), oldFedCollectedAt);
+
+  queryLog.length = 0;
+  const fedOldRevision = await collectMacro({
+    prisma,
+    only: ['fed'],
+    fetchImpl: fakeFetch({ fed: fedCsvFromRows(revisedFedRows) }).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_2,
+    log: () => {},
+    logError: () => {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fedOldRevisionSelects = macroQueries(queryLog, 'select');
+  const revisedOldDate = formatIsoDateUtc(fedRows[revisionIndex].refDate);
+  const revisedOld = await latestObservation(
+    prisma,
+    'fed_broad_dollar',
+    revisedOldDate
+  );
+
+  check(
+    'db: revisão fora de 10 dias grava linha nova',
+    fedOldRevision.ok &&
+      fedOldRevision.inserted === 1 &&
+      fedOldRevision.unchanged === 29 &&
+      revisedOld?.value?.toString() === '999.9999' &&
+      revisedOld.revisionNote === 'revised from 120',
+    `(inserted=${fedOldRevision.inserted} note=${revisedOld?.revisionNote})`
+  );
+  check(
+    'db: revisão antiga faz uma leitura por série',
+    fedOldRevisionSelects.length === 1,
+    `(selects=${fedOldRevisionSelects.length})`
   );
 
   await cleanup(prisma);
