@@ -39,6 +39,7 @@ export interface LeverageDateRange {
   from: string;
   to: string;
   asOfs: string[];
+  ignored: string[];
 }
 
 export interface LeverageSnapshotRow {
@@ -209,13 +210,27 @@ export function buildLeverageAsOfRange(
   options: ComputeLeverageOptions,
   now: Date = new Date()
 ): LeverageDateRange {
-  const to = options.to ?? yesterdayUtc(now);
-  const from = options.from ?? addDays(to, -(options.days - 1));
-  const totalDays = inclusiveDays(from, to);
+  const requestedTo = options.to ?? yesterdayUtc(now);
+  const requestedFrom = options.from ?? addDays(requestedTo, -(options.days - 1));
+  const yesterday = yesterdayUtc(now);
+  const firstIgnored = addDays(yesterday, 1);
+  const ignored: string[] = [];
+
+  if (requestedTo >= firstIgnored) {
+    const ignoredFrom = requestedFrom > firstIgnored ? requestedFrom : firstIgnored;
+    for (let day = ignoredFrom; day <= requestedTo; day = addDays(day, 1)) {
+      ignored.push(day);
+    }
+  }
+
+  const to = requestedTo > yesterday ? yesterday : requestedTo;
+  const from = requestedFrom;
 
   if (from > to) {
-    throw new Error(`intervalo inválido: ${from} > ${to}`);
+    throw new Error(`intervalo não contém dias concluídos (ontem UTC=${yesterday})`);
   }
+
+  const totalDays = inclusiveDays(from, to);
   if (totalDays > MAX_LEVERAGE_DAYS) {
     throw new Error(
       `intervalo de ${totalDays} dias excede o limite de ${MAX_LEVERAGE_DAYS} dias`
@@ -227,7 +242,7 @@ export function buildLeverageAsOfRange(
     asOfs.push(addDays(from, index));
   }
 
-  return { from, to, asOfs };
+  return { from, to, asOfs, ignored };
 }
 
 export function leverageLoadFrom(from: string): string {
@@ -412,6 +427,10 @@ async function main(): Promise<void> {
   try {
     const now = new Date();
     const range = buildLeverageAsOfRange(options, now);
+
+    for (const day of range.ignored) {
+      console.log(`[AVISO] dia ${day} ainda não terminou, ignorado`);
+    }
 
     const loaded = await loadLeverageObservationRows(
       prisma as PrismaClient,

@@ -7,6 +7,14 @@ export const LEVERAGE_KNOWN_CUTOFF_UTC_HOUR = 1;
 // e evitam transformar falhas curtas de coleta em um dia inteiro indisponível.
 export const LEVERAGE_MIN_HOURLY_BUCKETS = 20;
 
+// Hipótese, versionada: o fechamento do OI usa o último bucket do dia; antes das
+// 22:00 UTC o dia ainda pode receber preço/OI e não deve virar valor definitivo.
+export const LEVERAGE_MIN_LAST_BUCKET_HOUR_UTC = 22;
+
+// Hipótese, versionada: funding diário é uma soma, não uma média; por isso exige
+// o dia completo de 24 buckets horários para não subestimar o total.
+export const LEVERAGE_FUNDING_REQUIRED_BUCKETS = 24;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -234,6 +242,19 @@ function dailyLeverageClose(
     return coverageFailure(buckets);
   }
 
+  const lastHour = new Date(last.bucketTs).getUTCHours();
+  if (lastHour < LEVERAGE_MIN_LAST_BUCKET_HOUR_UTC) {
+    const lastLabel = `${String(lastHour).padStart(2, '0')}:00`;
+    const minLabel = `${String(LEVERAGE_MIN_LAST_BUCKET_HOUR_UTC).padStart(2, '0')}:00`;
+    return failed(
+      'insufficient_history',
+      `último bucket ${lastLabel}, mínimo ${minLabel}`,
+      buckets.length,
+      new Date(buckets[0].bucketTs),
+      new Date(last.bucketTs)
+    );
+  }
+
   return {
     value: oiCoin.times(markPrice),
     status: 'ok',
@@ -250,8 +271,14 @@ function dailyFundingSum(
 ): LeverageIndicatorResult {
   const buckets = completeBuckets(data, asOf, ['funding']);
 
-  if (buckets.length < LEVERAGE_MIN_HOURLY_BUCKETS) {
-    return coverageFailure(buckets);
+  if (buckets.length < LEVERAGE_FUNDING_REQUIRED_BUCKETS) {
+    return failed(
+      'insufficient_history',
+      `${buckets.length} buckets, exige ${LEVERAGE_FUNDING_REQUIRED_BUCKETS} para somar o dia`,
+      buckets.length,
+      buckets.length === 0 ? null : new Date(buckets[0].bucketTs),
+      buckets.length === 0 ? null : new Date(buckets[buckets.length - 1].bucketTs)
+    );
   }
 
   const value = buckets.reduce(

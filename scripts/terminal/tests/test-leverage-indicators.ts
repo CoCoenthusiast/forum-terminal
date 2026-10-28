@@ -11,7 +11,8 @@ import {
   computeLeverageIndicators,
 } from '../indicators/leverage-catalog';
 import {
-  LEVERAGE_MIN_HOURLY_BUCKETS,
+  LEVERAGE_FUNDING_REQUIRED_BUCKETS,
+  LEVERAGE_MIN_LAST_BUCKET_HOUR_UTC,
   aggregateLeverageHourly,
   leverageFunding7dMean,
   leverageFundingDailySum,
@@ -24,8 +25,10 @@ import {
   type LeverageObservation,
 } from '../indicators/leverage-formulas';
 import {
+  buildLeverageAsOfRange,
   buildLeverageSnapshotRows,
   loadLeverageObservationRows,
+  parseComputeLeverageArgs,
   writeLeverageRowsInBatches,
 } from '../indicators/compute-leverage-indicators';
 
@@ -43,9 +46,9 @@ const prisma = new PrismaClient({ adapter });
 
 const TEST_PROVIDER = 'test_compute_leverage_indicators';
 const TEST_SOURCE = 'test_leverage_source';
-const TEST_AS_OF_START = '2031-01-10';
-const TEST_AS_OF_END = '2031-01-11';
-const TEST_COMPUTED_AT = new Date('2031-01-12T12:00:00.000Z');
+const TEST_AS_OF_START = '2025-10-10';
+const TEST_AS_OF_END = '2025-10-11';
+const TEST_COMPUTED_AT = new Date('2025-10-12T12:00:00.000Z');
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 let passed = 0;
@@ -88,19 +91,24 @@ function rowsForMetric(
   return values.map((value, hour) => observation(metric, day, hour, value));
 }
 
+function rowsForHours(
+  day: string,
+  hours: readonly number[],
+  values: { oiCoin?: string; markPrice?: string } = {}
+): LeverageObservation[] {
+  return hours.flatMap((hour) => [
+    observation('perp_open_interest_coin', day, hour, values.oiCoin ?? '1'),
+    observation('perp_mark_price_usd', day, hour, values.markPrice ?? '100'),
+  ]);
+}
+
 function rowsForDay(
   day: string,
   values: { oiCoin?: string; markPrice?: string; hours?: number } = {}
 ): LeverageObservation[] {
-  const hours = values.hours ?? LEVERAGE_MIN_HOURLY_BUCKETS;
-  const rows: LeverageObservation[] = [];
-
-  for (let hour = 0; hour < hours; hour++) {
-    rows.push(observation('perp_open_interest_coin', day, hour, values.oiCoin ?? '1'));
-    rows.push(observation('perp_mark_price_usd', day, hour, values.markPrice ?? '100'));
-  }
-
-  return rows;
+  const totalHours = values.hours ?? LEVERAGE_FUNDING_REQUIRED_BUCKETS;
+  const hours = Array.from({ length: totalHours }, (_, index) => index);
+  return rowsForHours(day, hours, values);
 }
 
 function findOutput(
@@ -154,10 +162,10 @@ async function runPureTests(): Promise<void> {
   const day = '2026-10-26';
 
   const duplicateRows = rowsForDay(day);
-  duplicateRows.push(observation('perp_open_interest_coin', day, 19, '2', 90));
-  duplicateRows.push(observation('perp_mark_price_usd', day, 19, '200', 90));
-  duplicateRows.push(observation('perp_open_interest_coin', day, 19, '3', 1500));
-  duplicateRows.push(observation('perp_mark_price_usd', day, 19, '300', 1500));
+  duplicateRows.push(observation('perp_open_interest_coin', day, 23, '2', 90));
+  duplicateRows.push(observation('perp_mark_price_usd', day, 23, '200', 90));
+  duplicateRows.push(observation('perp_open_interest_coin', day, 23, '3', 120));
+  duplicateRows.push(observation('perp_mark_price_usd', day, 23, '300', 120));
 
   const duplicateResult = leverageOiUsdClose(
     aggregateLeverageHourly(duplicateRows, day),
@@ -167,7 +175,7 @@ async function runPureTests(): Promise<void> {
     'duplicata por hora usa a última coleta e respeita o corte',
     duplicateResult.status === 'ok' &&
       duplicateResult.value?.toString() === '400' &&
-      duplicateResult.inputCount === 20,
+      duplicateResult.inputCount === 24,
     `status=${duplicateResult.status} value=${duplicateResult.value?.toString()}`
   );
   check(
@@ -187,28 +195,30 @@ async function runPureTests(): Promise<void> {
     `status=${nineteen.status} reason=${nineteen.reason}`
   );
 
-  const twenty = leverageOiUsdClose(
-    aggregateLeverageHourly(rowsForDay(day, { markPrice: '10', hours: 20 }), day),
+  const twentyFour = leverageOiUsdClose(
+    aggregateLeverageHourly(rowsForDay(day, { markPrice: '10' }), day),
     day
   );
   check(
-    '20 buckets vira ok',
-    twenty.status === 'ok' && twenty.value?.toString() === '10',
-    `status=${twenty.status} value=${twenty.value?.toString()}`
+    '24 buckets vira ok',
+    twentyFour.status === 'ok' &&
+      twentyFour.value?.toString() === '10' &&
+      twentyFour.inputCount === 24,
+    `status=${twentyFour.status} value=${twentyFour.value?.toString()}`
   );
 
   const fundingRows = rowsForMetric(
     day,
     'perp_funding_rate_1h',
-    Array.from({ length: 20 }, () => '0.0001')
+    Array.from({ length: LEVERAGE_FUNDING_REQUIRED_BUCKETS }, () => '0.0001')
   );
   const funding = leverageFundingDailySum(
     aggregateLeverageHourly(fundingRows, day),
     day
   );
   check(
-    'funding diário é a soma manual dos 20 buckets',
-    funding.status === 'ok' && funding.value?.toString() === '0.002',
+    `funding diário soma os ${LEVERAGE_FUNDING_REQUIRED_BUCKETS} buckets`,
+    funding.status === 'ok' && funding.value?.toString() === '0.0024',
     `status=${funding.status} value=${funding.value?.toString()}`
   );
 
@@ -263,7 +273,7 @@ async function runPureTests(): Promise<void> {
     rowsForMetric(
       fundingDay,
       'perp_funding_rate_1h',
-      Array.from({ length: 20 }, () => '0.0001')
+      Array.from({ length: LEVERAGE_FUNDING_REQUIRED_BUCKETS }, () => '0.0001')
     )
   );
   const funding7d = leverageFunding7dMean(
@@ -272,8 +282,76 @@ async function runPureTests(): Promise<void> {
   );
   check(
     'funding 7d exige os 7 dias e faz a média das somas',
-    funding7d.status === 'ok' && funding7d.value?.toString() === '0.002',
+    funding7d.status === 'ok' && funding7d.value?.toString() === '0.0024',
     `status=${funding7d.status} value=${funding7d.value?.toString()}`
+  );
+
+  const fullDayRows = [
+    ...rowsForDay(day),
+    ...rowsForMetric(
+      day,
+      'perp_funding_rate_1h',
+      Array.from({ length: 24 }, () => '0.0001')
+    ),
+    ...rowsForMetric(day, 'perp_premium', Array.from({ length: 24 }, () => '0.001')),
+  ];
+  const fullDay = aggregateLeverageHourly(fullDayRows, day);
+  check(
+    'dia com 24 buckets é ok para OI, funding e premium',
+    leverageOiUsdClose(fullDay, day).status === 'ok' &&
+      leverageFundingDailySum(fullDay, day).status === 'ok' &&
+      leveragePremiumDailyMean(fullDay, day).status === 'ok'
+  );
+
+  const hours22 = Array.from({ length: 22 }, (_, index) => index + 2);
+  const partial22Rows = [
+    ...rowsForHours(day, hours22),
+    ...hours22.map((hour) => observation('perp_funding_rate_1h', day, hour, '0.0001')),
+    ...hours22.map((hour) => observation('perp_premium', day, hour, '0.001')),
+  ];
+  const partial22 = aggregateLeverageHourly(partial22Rows, day);
+  const partial22Funding = leverageFundingDailySum(partial22, day);
+  check(
+    '22 buckets com último 23:00: OI e premium ok, funding insuficiente',
+    leverageOiUsdClose(partial22, day).status === 'ok' &&
+      leveragePremiumDailyMean(partial22, day).status === 'ok' &&
+      partial22Funding.status === 'insufficient_history' &&
+      (partial22Funding.reason?.includes('22 buckets, exige 24') ?? false),
+    `funding=${partial22Funding.reason}`
+  );
+
+  const hours21 = Array.from({ length: 21 }, (_, index) => index);
+  const partial21 = aggregateLeverageHourly(rowsForHours(day, hours21), day);
+  const partial21Close = leverageOiUsdClose(partial21, day);
+  check(
+    '21 buckets com último 20:00: OI insuficiente pelo fechamento',
+    partial21Close.status === 'insufficient_history' &&
+      partial21Close.value === null &&
+      (partial21Close.reason?.includes('último bucket 20:00, mínimo 22:00') ?? false),
+    `status=${partial21Close.status} reason=${partial21Close.reason}`
+  );
+
+  const now = new Date('2026-10-27T12:00:00.000Z');
+  const clamped = buildLeverageAsOfRange(
+    parseComputeLeverageArgs(
+      ['--from=2026-10-26', '--to=2026-10-27', '--dry-run'],
+      now
+    ),
+    now
+  );
+  check(
+    '--to de hoje é cortado em ontem e gera aviso',
+    clamped.to === '2026-10-26' &&
+      clamped.asOfs.length === 1 &&
+      clamped.asOfs[0] === '2026-10-26' &&
+      clamped.ignored.length === 1 &&
+      clamped.ignored[0] === '2026-10-27',
+    `to=${clamped.to} asOfs=${clamped.asOfs.join(',')} ignored=${clamped.ignored.join(',')}`
+  );
+  check(
+    'constantes de fechamento e funding são versionadas',
+    LEVERAGE_MIN_LAST_BUCKET_HOUR_UTC === 22 &&
+      LEVERAGE_FUNDING_REQUIRED_BUCKETS === 24
   );
 
   const empty = aggregateLeverageHourly([], day);
