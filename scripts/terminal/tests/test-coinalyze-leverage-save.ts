@@ -9,6 +9,7 @@ import {
 } from '../indicators/compute-coinalyze-leverage';
 
 const TEST_FORMULA_VERSION = 'coinalyze_leverage_v1_test_save';
+const TEST_PRECISION_FORMULA_VERSION = 'coinalyze_leverage_v1_test_precision';
 const TEST_SCOPE = 'coinalyze:TEST';
 const TEST_AS_OF = new Date('2099-01-01T00:00:00.000Z');
 
@@ -40,7 +41,8 @@ function localDbUrl(): string | null {
 function row(
   indicator: string,
   value: string | null,
-  computedAt: Date
+  computedAt: Date,
+  formulaVersion: string = TEST_FORMULA_VERSION
 ): CoinalyzeLeverageSnapshotRow {
   return {
     indicator,
@@ -53,14 +55,18 @@ function row(
     fromDate: value === null ? null : new Date('2098-12-26T00:00:00.000Z'),
     toDate: value === null ? null : new Date('2098-12-31T00:00:00.000Z'),
     reason: value === null ? 'sem valor suficiente' : null,
-    formulaVersion: TEST_FORMULA_VERSION,
+    formulaVersion,
     computedAt,
   };
 }
 
 async function cleanup(prisma: PrismaClient): Promise<void> {
   await prisma.indicatorSnapshot.deleteMany({
-    where: { formulaVersion: TEST_FORMULA_VERSION },
+    where: {
+      formulaVersion: {
+        in: [TEST_FORMULA_VERSION, TEST_PRECISION_FORMULA_VERSION],
+      },
+    },
   });
 }
 
@@ -179,6 +185,81 @@ async function run(prisma: PrismaClient): Promise<void> {
   );
 }
 
+async function runPrecision(prisma: PrismaClient): Promise<void> {
+  const firstAt = new Date('2026-10-23T13:00:00.000Z');
+  const secondAt = new Date('2026-10-23T14:00:00.000Z');
+  const thirdAt = new Date('2026-10-23T15:00:00.000Z');
+  const indicator = 'test_coinalyze_precision';
+  const longValue = '0.591416420046666263';
+  const firstRows = [
+    row(indicator, longValue, firstAt, TEST_PRECISION_FORMULA_VERSION),
+  ];
+  const first = await writeCoinalyzeLeverageRowsInBatches(prisma, firstRows);
+  const firstStored = await prisma.indicatorSnapshot.findFirst({
+    where: {
+      formulaVersion: TEST_PRECISION_FORMULA_VERSION,
+      indicator,
+    },
+  });
+
+  check(
+    'valor com 18 casas é gravado arredondado em 12 casas',
+    first.created === 1 &&
+      first.updated === 0 &&
+      first.equal === 0 &&
+      first.absent === 0 &&
+      firstStored?.value?.toString() === '0.591416420047',
+    `(created=${first.created} value=${firstStored?.value?.toString()})`
+  );
+
+  const secondRows = [
+    row(indicator, longValue, secondAt, TEST_PRECISION_FORMULA_VERSION),
+  ];
+  const second = await writeCoinalyzeLeverageRowsInBatches(prisma, secondRows);
+  const secondStored = await prisma.indicatorSnapshot.findFirst({
+    where: {
+      formulaVersion: TEST_PRECISION_FORMULA_VERSION,
+      indicator,
+    },
+  });
+
+  check(
+    'segunda execução com valor longo conta como igual',
+    second.created === 0 &&
+      second.updated === 0 &&
+      second.equal === 1 &&
+      second.absent === 0 &&
+      secondStored?.computedAt.toISOString() === firstStored?.computedAt.toISOString(),
+    `(created=${second.created} updated=${second.updated} equal=${second.equal})`
+  );
+
+  const changedRows = [
+    row(
+      indicator,
+      '0.591416420047666263',
+      thirdAt,
+      TEST_PRECISION_FORMULA_VERSION
+    ),
+  ];
+  const changed = await writeCoinalyzeLeverageRowsInBatches(prisma, changedRows);
+  const changedStored = await prisma.indicatorSnapshot.findFirst({
+    where: {
+      formulaVersion: TEST_PRECISION_FORMULA_VERSION,
+      indicator,
+    },
+  });
+
+  check(
+    'mudança real na 12ª casa atualiza',
+    changed.created === 0 &&
+      changed.updated === 1 &&
+      changed.equal === 0 &&
+      changed.absent === 0 &&
+      changedStored?.value?.toString() === '0.591416420048',
+    `(updated=${changed.updated} value=${changedStored?.value?.toString()})`
+  );
+}
+
 async function main(): Promise<void> {
   const url = localDbUrl();
   if (url === null) {
@@ -191,6 +272,7 @@ async function main(): Promise<void> {
 
   try {
     await run(prisma);
+    await runPrecision(prisma);
   } catch (error) {
     check('teste executou', false, error instanceof Error ? error.message : String(error));
   } finally {

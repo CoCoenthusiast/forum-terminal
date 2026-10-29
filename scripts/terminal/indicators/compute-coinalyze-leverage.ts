@@ -22,6 +22,8 @@ import {
 
 export const DEFAULT_COINALYZE_LEVERAGE_DAYS = 5;
 export const COINALYZE_LEVERAGE_WRITE_BATCH_SIZE = 500;
+// IndicatorSnapshot.value é numeric(30,12): alinhar ao arredondamento do Postgres.
+export const COINALYZE_LEVERAGE_VALUE_SCALE = 12;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -333,6 +335,15 @@ function sameDate(left: Date | null, right: Date | null): boolean {
   return left.getTime() === right.getTime();
 }
 
+function roundSnapshotValue(value: Decimal | null): Decimal | null {
+  return value === null
+    ? null
+    : value.toDecimalPlaces(
+        COINALYZE_LEVERAGE_VALUE_SCALE,
+        Decimal.ROUND_HALF_UP
+      );
+}
+
 function sameValue(left: Decimal | null, right: Decimal | null): boolean {
   if (left === null || right === null) return left === right;
   return left.equals(right);
@@ -400,12 +411,16 @@ export async function writeCoinalyzeLeverageRowsInBatches(
     throw new Error(`batchSize inválido: ${batchSize}`);
   }
 
-  const writable = rows.filter((row) => row.value !== null);
+  const normalizedRows = rows.map((row) => ({
+    ...row,
+    value: roundSnapshotValue(row.value),
+  }));
+  const writable = normalizedRows.filter((row) => row.value !== null);
   const result: CoinalyzeLeverageWriteResult = {
     created: 0,
     updated: 0,
     equal: 0,
-    absent: rows.length - writable.length,
+    absent: normalizedRows.length - writable.length,
   };
 
   for (let start = 0; start < writable.length; start += batchSize) {
