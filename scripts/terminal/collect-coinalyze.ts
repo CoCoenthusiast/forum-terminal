@@ -41,6 +41,7 @@ import {
 } from './sources/coinalyze';
 
 const OPERATION = 'fetch_coinalyze_history';
+const VALUE_DECIMAL_PLACES = 8;
 const ENDPOINT_ORDER: readonly CoinalyzeEndpoint[] = [
   'open_interest',
   'funding_rate',
@@ -119,6 +120,13 @@ export interface CoinalyzeCliOptions {
   dryRun: boolean;
   backfillFrom: Date | null;
   only: CoinalyzeAsset[] | null;
+}
+
+function roundObservationValue(value: string): Decimal {
+  return new Decimal(value).toDecimalPlaces(
+    VALUE_DECIMAL_PLACES,
+    Decimal.ROUND_HALF_UP
+  );
 }
 
 function errorMessage(error: unknown): string {
@@ -323,7 +331,7 @@ async function persistSeries(
 
   for (const observation of observations) {
     const latest = existing.latest.get(formatIsoDateUtc(observation.refDate));
-    const value = new Decimal(observation.value);
+    const value = roundObservationValue(observation.value);
     const sameValue =
       latest !== undefined &&
       latest.status === observation.status &&

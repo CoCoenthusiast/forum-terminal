@@ -46,6 +46,7 @@ interface FakeOptions {
   retryAfter?: string;
   reviseDate?: string;
   revisedValue?: string;
+  oiOverrides?: Record<string, string>;
   missing?: {
     asset: CoinalyzeAsset;
     endpoint: CoinalyzeEndpoint;
@@ -146,7 +147,7 @@ function pointsFromUrl(url: URL, options: FakeOptions): unknown[] {
       point.c =
         options.reviseDate === iso && options.revisedValue !== undefined
           ? options.revisedValue
-          : oiValue(asset, day);
+          : options.oiOverrides?.[`${asset}:${iso}`] ?? oiValue(asset, day);
     } else if (endpoint === 'funding_rate') {
       point.o = fundingValue(asset, day);
       point.h = fundingValue(asset, day);
@@ -653,6 +654,143 @@ async function runDb(prisma: PrismaClient, queryLog: QueryLog[]): Promise<void> 
     'db: segundo backfill grava zero',
     backfillAgain.ok && backfillAgain.inserted === 0 && backfillAgain.unchanged === 150,
     `(inserted=${backfillAgain.inserted} unchanged=${backfillAgain.unchanged})`
+  );
+
+  await cleanup(prisma);
+
+  const longBaseOverrides: Record<string, string> = {
+    'sol:2026-10-22': '824229.14280000',
+    'sol:2026-10-23': '1051912.52420000',
+    'sol:2026-10-24': '-1051912.52420000',
+    'sol:2026-10-25': '0.00000000',
+  };
+  const longApiOverrides: Record<string, string> = {
+    'sol:2026-10-22': '824229.1428000003',
+    'sol:2026-10-23': '1051912.5242000006',
+    'sol:2026-10-24': '-1051912.5242000006',
+    'sol:2026-10-25': '0.000000004',
+  };
+  const longFirst = await collectCoinalyze({
+    prisma,
+    only: ['sol'],
+    fetchImpl: fakeFetch({ oiOverrides: longBaseOverrides }).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_1,
+    log: () => {},
+    logError: () => {},
+  });
+  const longSecond = await collectCoinalyze({
+    prisma,
+    only: ['sol'],
+    fetchImpl: fakeFetch({ oiOverrides: longApiOverrides }).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_2,
+    log: () => {},
+    logError: () => {},
+  });
+  const longTotal = await prisma.macroObservation.count({ where: { source: 'coinalyze' } });
+  const longOis = await Promise.all(
+    ['2026-10-22', '2026-10-23', '2026-10-24', '2026-10-25'].map((date) =>
+      latestObservation(prisma, 'coinalyze_sol_oi_usd_close', date)
+    )
+  );
+  const unchangedAt = (row: ObservationRow | null): boolean =>
+    row?.collectedAt.toISOString() === FIXED_NOW_1.toISOString();
+
+  check(
+    'db: valores longos arredondados não geram revisão falsa',
+    longFirst.ok &&
+      longFirst.inserted === 30 &&
+      longSecond.ok &&
+      longSecond.inserted === 0 &&
+      longSecond.unchanged === 30 &&
+      longTotal === 30,
+    `(first=${longFirst.inserted} second=${longSecond.inserted} total=${longTotal})`
+  );
+  check(
+    'db: 1051912.5242000006 é igual a 1051912.52420000 após arredondar',
+    longOis[1]?.value?.toString() === '1051912.5242' && unchangedAt(longOis[1]),
+    `(value=${longOis[1]?.value?.toString()})`
+  );
+  check(
+    'db: 824229.1428000003 é igual a 824229.14280000 após arredondar',
+    longOis[0]?.value?.toString() === '824229.1428' && unchangedAt(longOis[0]),
+    `(value=${longOis[0]?.value?.toString()})`
+  );
+  check(
+    'db: valores negativo e zero longos são iguais após arredondar',
+    longOis[2]?.value?.toString() === '-1051912.5242' &&
+      unchangedAt(longOis[2]) &&
+      longOis[3]?.value?.toString() === '0' &&
+      unchangedAt(longOis[3]),
+    `(negative=${longOis[2]?.value?.toString()} zero=${longOis[3]?.value?.toString()})`
+  );
+
+  const longRevision = await collectCoinalyze({
+    prisma,
+    only: ['sol'],
+    fetchImpl: fakeFetch({
+      oiOverrides: { ...longApiOverrides, 'sol:2026-10-23': '1051912.52420001' },
+    }).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_3,
+    log: () => {},
+    logError: () => {},
+  });
+  const revisedLongOis = await latestObservation(
+    prisma,
+    'coinalyze_sol_oi_usd_close',
+    '2026-10-23'
+  );
+
+  check(
+    'db: mudança real na 8ª casa grava revisão',
+    longRevision.ok &&
+      longRevision.inserted === 1 &&
+      longRevision.unchanged === 29 &&
+      revisedLongOis?.value?.toString() === '1051912.52420001' &&
+      revisedLongOis.revisionNote === 'revised from 1051912.5242' &&
+      revisedLongOis.firstSeenAt.toISOString() === FIXED_NOW_1.toISOString(),
+    `(inserted=${longRevision.inserted} note=${revisedLongOis?.revisionNote})`
+  );
+
+  await cleanup(prisma);
+
+  const longBackfillOverrides: Record<string, string> = {
+    'sol:2026-10-01': '1051912.5242000006',
+    'sol:2026-10-02': '824229.1428000003',
+    'sol:2026-10-03': '-1051912.5242000006',
+    'sol:2026-10-04': '0.000000004',
+  };
+  const longBackfillFirst = await collectCoinalyze({
+    prisma,
+    only: ['sol'],
+    backfillFrom: parseIsoDateUtc('2026-10-01') ?? undefined,
+    fetchImpl: fakeFetch({ oiOverrides: longBackfillOverrides }).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_1,
+    log: () => {},
+    logError: () => {},
+  });
+  const longBackfillAgain = await collectCoinalyze({
+    prisma,
+    only: ['sol'],
+    backfillFrom: parseIsoDateUtc('2026-10-01') ?? undefined,
+    fetchImpl: fakeFetch({ oiOverrides: longBackfillOverrides }).fetchImpl,
+    sleepImpl: async () => {},
+    now: () => FIXED_NOW_2,
+    log: () => {},
+    logError: () => {},
+  });
+
+  check(
+    'db: segundo backfill com valores longos grava zero',
+    longBackfillFirst.ok &&
+      longBackfillFirst.inserted === 150 &&
+      longBackfillAgain.ok &&
+      longBackfillAgain.inserted === 0 &&
+      longBackfillAgain.unchanged === 150,
+    `(first=${longBackfillFirst.inserted} second=${longBackfillAgain.inserted})`
   );
 
   await cleanup(prisma);
