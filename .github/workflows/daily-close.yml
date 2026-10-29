@@ -56,6 +56,13 @@ jobs:
           TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
           COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
           TERMINAL_ALLOW_REMOTE: '1'
+      - run: npm run compute:coinalyze-leverage -- --days=3 --save
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
+          TERMINAL_ALLOW_REMOTE: '1'
       - run: npm run compute:macro-indicators -- --days=5 --save
         if: always()
         continue-on-error: true
