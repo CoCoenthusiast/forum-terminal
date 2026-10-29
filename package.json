@@ -10,6 +10,7 @@
     "collect:hyperliquid": "tsx scripts/terminal/collect-hyperliquid.ts",
     "collect:macro": "tsx scripts/terminal/collect-macro.ts",
     "probe:coinalyze": "tsx scripts/terminal/probe-coinalyze.ts",
+    "collect:coinalyze": "tsx scripts/terminal/collect-coinalyze.ts",
     "backfill": "tsx scripts/terminal/backfill-history.ts",
     "report:quality": "tsx scripts/terminal/report-quality.ts",
     "report:tokens": "tsx scripts/terminal/report-tokens.ts",
