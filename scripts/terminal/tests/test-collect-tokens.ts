@@ -188,6 +188,26 @@ function infoPayload(): unknown {
   };
 }
 
+function prismaWithFailingFailureCreate(
+  prisma: PrismaClient,
+  error: Error
+): PrismaClient {
+  return new Proxy(prisma, {
+    get(target, property) {
+      if (property === 'tokenCollectionFailure') {
+        return {
+          create: async () => {
+            throw error;
+          },
+        };
+      }
+
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 async function cleanup(prisma: PrismaClient): Promise<void> {
   await prisma.tokenCollectionFailure.deleteMany({
     where: { tokenAddress: { in: [TOKEN, OTHER_TOKEN] } },
@@ -360,6 +380,55 @@ async function runInfo404(prisma: PrismaClient): Promise<void> {
   check('404 info: falha registrada', failure !== null && failure.httpStatus === 404);
 }
 
+async function runFailureLog(prisma: PrismaClient): Promise<void> {
+  await cleanup(prisma);
+  const fake = fakeFetch((url) => {
+    const kind = callKind(url);
+    if (kind === 'info') return json(404, { errors: [{ status: '404' }] });
+    if (kind === 'pools') return json(200, poolsPayload());
+    return json(200, tokenPayload('5.0'));
+  });
+  const beginning = `INICIO_NAO_DEVERIA_APARECER_${'x'.repeat(500)}`;
+  const ending = 'FINAL_DA_CAUSA_REAL';
+  const createError = Object.assign(new Error(`${beginning} ${ending}`), {
+    code: 'P2003',
+    meta: { field_name: 'tokenId', reason: 'META_DA_CAUSA' },
+  });
+  const lines: string[] = [];
+
+  const result = await collectTokens({
+    tokens: [TOKEN],
+    prisma: prismaWithFailingFailureCreate(prisma, createError),
+    fetchImpl: fake.fetchImpl,
+    intervalMs: 0,
+    now: () => FIXED_NOW,
+    log: () => {},
+    logError: (line) => lines.push(line),
+  });
+
+  const line = lines.find((entry) =>
+    entry.includes('[DB] não foi possível registrar a falha')
+  );
+
+  check(
+    'falha ao registrar: não relança e mantém falha',
+    result.failures === 1 && !result.rateLimited
+  );
+  check(
+    'falha ao registrar: log mostra code',
+    line?.includes('code=P2003') === true,
+    `(${line})`
+  );
+  check(
+    'falha ao registrar: log mostra meta JSON',
+    line?.includes('meta={"field_name":"tokenId","reason":"META_DA_CAUSA"}') === true
+  );
+  check(
+    'falha ao registrar: log mostra final da mensagem',
+    line?.includes(ending) === true && line?.includes(beginning) !== true
+  );
+}
+
 async function runDryRun(prisma: PrismaClient): Promise<void> {
   await cleanup(prisma);
   const fake = fakeFetch((url) => {
@@ -405,6 +474,7 @@ async function main(): Promise<void> {
     await runIdempotent(prisma);
     await runRateLimit(prisma);
     await runInfo404(prisma);
+    await runFailureLog(prisma);
     await runDryRun(prisma);
   } catch (e) {
     check('teste executou', false, e instanceof Error ? e.message : String(e));

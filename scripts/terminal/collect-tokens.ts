@@ -332,6 +332,35 @@ function errorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 300);
 }
 
+function failureRecordError(error: unknown): string {
+  const parts: string[] = [];
+
+  if (error !== null && typeof error === 'object') {
+    const record = error as { code?: unknown; meta?: unknown };
+
+    if (record.code !== undefined) {
+      parts.push(`code=${String(record.code)}`);
+    }
+
+    if (record.meta !== undefined) {
+      let meta: string;
+
+      try {
+        meta = JSON.stringify(record.meta);
+      } catch {
+        meta = String(record.meta);
+      }
+
+      parts.push(`meta=${meta}`);
+    }
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  parts.push(`message=${message.slice(-400)}`);
+
+  return parts.join(' ');
+}
+
 async function findTokenId(prisma: PrismaClient, address: string): Promise<string | null> {
   try {
     const token = await prisma.token.findUnique({
@@ -375,7 +404,7 @@ async function recordFailure(
     );
   } catch (logError) {
     ctx.logError(
-      `[DB] não foi possível registrar a falha de ${shortAddress(address)}: ${errorMessage(logError)}`
+      `[DB] não foi possível registrar a falha de ${shortAddress(address)}: ${failureRecordError(logError)}`
     );
   }
 }
