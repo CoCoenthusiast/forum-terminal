@@ -21,6 +21,7 @@ import {
 } from './coinalyze-leverage-reader';
 
 export const DEFAULT_COINALYZE_LEVERAGE_DAYS = 5;
+export const COINALYZE_LEVERAGE_WRITE_BATCH_SIZE = 500;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -29,6 +30,7 @@ export interface ComputeCoinalyzeLeverageOptions {
   from: string | null;
   to: string | null;
   dryRun: boolean;
+  save: boolean;
 }
 
 export interface CoinalyzeLeverageDateRange {
@@ -56,6 +58,13 @@ export interface CoinalyzeLeverageRowsResult {
   rows: CoinalyzeLeverageSnapshotRow[];
   nullCount: number;
   firstCompleteAsOf: string | null;
+}
+
+export interface CoinalyzeLeverageWriteResult {
+  created: number;
+  updated: number;
+  equal: number;
+  absent: number;
 }
 
 function isoDate(date: Date): string {
@@ -116,6 +125,7 @@ export function parseComputeCoinalyzeLeverageArgs(
   let from: string | null = null;
   let to: string | null = null;
   let dryRun = false;
+  let save = false;
 
   function valueAfter(index: number, flag: string): string {
     const next = argv[index + 1];
@@ -130,6 +140,11 @@ export function parseComputeCoinalyzeLeverageArgs(
 
     if (arg === '--dry-run') {
       dryRun = true;
+      continue;
+    }
+
+    if (arg === '--save') {
+      save = true;
       continue;
     }
 
@@ -173,7 +188,7 @@ export function parseComputeCoinalyzeLeverageArgs(
     throw new Error(`intervalo inválido: ${resolvedFrom} > ${resolvedTo}`);
   }
 
-  return { days, from, to, dryRun };
+  return { days, from, to, dryRun, save };
 }
 
 export function buildCoinalyzeLeverageAsOfRange(
@@ -299,6 +314,171 @@ export function buildCoinalyzeLeverageSnapshotRows(
   return { rows, nullCount, firstCompleteAsOf };
 }
 
+function rowKey(row: {
+  indicator: string;
+  scope: string;
+  asOf: Date;
+  formulaVersion: string;
+}): string {
+  return [
+    row.indicator,
+    row.scope,
+    row.asOf.toISOString(),
+    row.formulaVersion,
+  ].join('\u0000');
+}
+
+function sameDate(left: Date | null, right: Date | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.getTime() === right.getTime();
+}
+
+function sameValue(left: Decimal | null, right: Decimal | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.equals(right);
+}
+
+function sameSnapshot(
+  existing: {
+    status: string;
+    value: Decimal | null;
+    unit: string;
+    inputCount: number;
+    fromDate: Date | null;
+    toDate: Date | null;
+    reason: string | null;
+  },
+  row: CoinalyzeLeverageSnapshotRow
+): boolean {
+  return (
+    existing.status === row.status &&
+    sameValue(existing.value, row.value) &&
+    existing.unit === row.unit &&
+    existing.inputCount === row.inputCount &&
+    sameDate(existing.fromDate, row.fromDate) &&
+    sameDate(existing.toDate, row.toDate) &&
+    existing.reason === row.reason
+  );
+}
+
+function snapshotData(row: CoinalyzeLeverageSnapshotRow): {
+  indicator: string;
+  scope: string;
+  asOf: Date;
+  status: string;
+  value: Decimal | null;
+  unit: string;
+  inputCount: number;
+  fromDate: Date | null;
+  toDate: Date | null;
+  reason: string | null;
+  formulaVersion: string;
+  computedAt: Date;
+} {
+  return {
+    indicator: row.indicator,
+    scope: row.scope,
+    asOf: row.asOf,
+    status: row.status,
+    value: row.value,
+    unit: row.unit,
+    inputCount: row.inputCount,
+    fromDate: row.fromDate,
+    toDate: row.toDate,
+    reason: row.reason,
+    formulaVersion: row.formulaVersion,
+    computedAt: row.computedAt,
+  };
+}
+
+export async function writeCoinalyzeLeverageRowsInBatches(
+  client: Pick<PrismaClient, 'indicatorSnapshot'>,
+  rows: readonly CoinalyzeLeverageSnapshotRow[],
+  batchSize: number = COINALYZE_LEVERAGE_WRITE_BATCH_SIZE
+): Promise<CoinalyzeLeverageWriteResult> {
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    throw new Error(`batchSize inválido: ${batchSize}`);
+  }
+
+  const writable = rows.filter((row) => row.value !== null);
+  const result: CoinalyzeLeverageWriteResult = {
+    created: 0,
+    updated: 0,
+    equal: 0,
+    absent: rows.length - writable.length,
+  };
+
+  for (let start = 0; start < writable.length; start += batchSize) {
+    const batch = writable.slice(start, start + batchSize);
+    const existingRows = await client.indicatorSnapshot.findMany({
+      where: {
+        OR: batch.map((row) => ({
+          indicator: row.indicator,
+          scope: row.scope,
+          asOf: row.asOf,
+          formulaVersion: row.formulaVersion,
+        })),
+      },
+      select: {
+        indicator: true,
+        scope: true,
+        asOf: true,
+        status: true,
+        value: true,
+        unit: true,
+        inputCount: true,
+        fromDate: true,
+        toDate: true,
+        reason: true,
+        formulaVersion: true,
+      },
+    });
+    const existingByKey = new Map(
+      existingRows.map((row) => [rowKey(row), row])
+    );
+
+    for (const row of batch) {
+      const existing = existingByKey.get(rowKey(row));
+      const data = snapshotData(row);
+
+      if (existing !== undefined && sameSnapshot(existing, row)) {
+        result.equal++;
+        continue;
+      }
+
+      await client.indicatorSnapshot.upsert({
+        where: {
+          indicator_scope_asOf_formulaVersion: {
+            indicator: row.indicator,
+            scope: row.scope,
+            asOf: row.asOf,
+            formulaVersion: row.formulaVersion,
+          },
+        },
+        create: data,
+        update: {
+          status: data.status,
+          value: data.value,
+          unit: data.unit,
+          inputCount: data.inputCount,
+          fromDate: data.fromDate,
+          toDate: data.toDate,
+          reason: data.reason,
+          computedAt: data.computedAt,
+        },
+      });
+
+      if (existing === undefined) {
+        result.created++;
+      } else {
+        result.updated++;
+      }
+    }
+  }
+
+  return result;
+}
+
 function formatValue(value: Decimal | null): string {
   return value === null ? 'null' : value.toString();
 }
@@ -360,7 +540,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!options.dryRun) {
+  if (!options.dryRun && !options.save) {
     console.error('[ABORT] gravação ainda não implementada');
     process.exitCode = 1;
     return;
@@ -391,16 +571,32 @@ async function main(): Promise<void> {
       range.asOfs,
       now
     );
+    const writes = options.save && !options.dryRun;
+    let writeResult: CoinalyzeLeverageWriteResult = {
+      created: 0,
+      updated: 0,
+      equal: 0,
+      absent: computed.nullCount,
+    };
 
-    printDryRun(
-      range.asOfs,
-      computed.rows,
-      computed.nullCount,
-      computed.firstCompleteAsOf
-    );
+    if (writes) {
+      writeResult = await writeCoinalyzeLeverageRowsInBatches(
+        prisma as PrismaClient,
+        computed.rows
+      );
+    } else {
+      printDryRun(
+        range.asOfs,
+        computed.rows,
+        computed.nullCount,
+        computed.firstCompleteAsOf
+      );
+    }
 
     console.log(
-      `[SAVE] não executado (--dry-run); linhas_gravadas=0 ` +
+      `[SAVE] ${writes ? '' : 'não executado (--dry-run); '}` +
+        `criadas=${writeResult.created} atualizadas=${writeResult.updated} ` +
+        `iguais=${writeResult.equal} ausentes=${writeResult.absent} ` +
         `formulaVersion=${COINALYZE_LEVERAGE_FORMULA_VERSION}`
     );
   } catch (error) {
