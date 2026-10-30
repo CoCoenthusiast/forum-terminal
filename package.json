@@ -14,6 +14,7 @@
     "backfill": "tsx scripts/terminal/backfill-history.ts",
     "report:quality": "tsx scripts/terminal/report-quality.ts",
     "report:tokens": "tsx scripts/terminal/report-tokens.ts",
+    "report:phase11": "tsx scripts/terminal/research/report-phase11.ts",
     "report:macro-indicators": "tsx scripts/terminal/indicators/macro-catalog.ts",
     "test": "npm run test:series && npm run test:formulas && npm run test:loaders && npm run test:quality && npm run test:backfill",
     "test:series": "tsx scripts/terminal/indicators/test-series.ts",
