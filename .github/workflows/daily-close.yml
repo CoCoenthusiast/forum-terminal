@@ -30,7 +30,7 @@ jobs:
           DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
           DIRECT_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
           TERMINAL_DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
-      - run: npx tsx scripts/terminal/backfill-history.ts --days=3 --only=coingecko
+      - run: npx tsx scripts/terminal/backfill-history.ts --days=7 --only=coingecko
         env:
           TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
           COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
