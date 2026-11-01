@@ -1,8 +1,17 @@
 export const RECAP_FOOTER =
   'Data: CoinGecko (Powered by CoinGecko), DefiLlama, Coinalyze, U.S. Treasury, Federal Reserve. Informational only, not financial advice. Draft generated automatically; reviewed before posting.';
 
-export const RECAP_WEEKEND_DEX_NOTE =
-  'DEX volume has tended to read about 15 to 20% below its 7-day average on Saturdays and Sundays (calendar effect).';
+export const RECAP_WEEKEND_VOLUME_NOTE =
+  'Volume comparisons tend to read lower on Saturdays and Sundays.';
+
+export const RECAP_WEEKEND_DEX_NOTE = RECAP_WEEKEND_VOLUME_NOTE;
+
+export const LAUNCHPAD_LABELS: Readonly<Record<string, string>> = {
+  'pump.fun': 'pump.fun',
+  pumpswap: 'PumpSwap',
+  launchlab: 'LaunchLab',
+  'meteora-dynamic-bonding-curve': 'Meteora DBC',
+};
 
 export const REGIME_LABELS: Readonly<Record<string, string>> = {
   trend_up_confirmed: 'Uptrend, confirmed',
@@ -68,6 +77,13 @@ export interface RecapInput {
 
 const PRICE_ORDER = ['SOL', 'BTC', 'ETH'] as const;
 
+const USD_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
 function parseIsoDateUtc(value: string): number | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (match === null) return null;
@@ -108,7 +124,7 @@ function toPercent(value: number, unit: string | null | undefined): number {
 function formatUsd(metric: RecapMetric | null | undefined): string {
   const value = finiteOrNull(metric?.value);
   if (value === null) return 'n/a';
-  return `$${value.toFixed(2)}`;
+  return USD_FORMATTER.format(value);
 }
 
 function formatPercent(metric: RecapMetric | null | undefined): string {
@@ -167,6 +183,28 @@ function dataAsOfSuffix(
   return ` (data as of ${dataAsOf})`;
 }
 
+function commonDataAsOf(
+  metrics: readonly (RecapMetric | null | undefined)[],
+  recapAsOf: string
+): string | null {
+  if (metrics.length === 0) return null;
+
+  const dates = metrics.map((metric) => {
+    if (finiteOrNull(metric?.value) === null) return null;
+    const dataAsOf = dataOf(metric);
+    if (dataAsOf === null || dataAsOf >= recapAsOf) return null;
+    return dataAsOf;
+  });
+
+  const first = dates[0];
+  if (first === null) return null;
+  return dates.every((date) => date === first) ? first : null;
+}
+
+function launchpadName(slug: string): string {
+  return LAUNCHPAD_LABELS[slug] ?? slug;
+}
+
 function metricText(
   label: string,
   formatted: string,
@@ -204,11 +242,19 @@ function regimeLine(regime: RecapRegime | null): string {
 function launchpadLine(input: RecapInput): string {
   if (input.activity.launchpads.length === 0) return '- Launchpads: n/a';
 
+  const sharedDataAsOf = commonDataAsOf(
+    input.activity.launchpads.map((item) => item.value),
+    input.asOf
+  );
   const items = input.activity.launchpads.map((item) => {
     const value = formatPercent(item.value);
-    return `${item.slug} ${value}${dataAsOfSuffix(item.value, input.asOf)}`;
+    const suffix =
+      sharedDataAsOf === null ? dataAsOfSuffix(item.value, input.asOf) : '';
+    return `${launchpadName(item.slug)} ${value}${suffix}`;
   });
-  return `- Launchpads: ${items.join('; ')}`;
+  const suffix =
+    sharedDataAsOf === null ? '' : ` (data as of ${sharedDataAsOf})`;
+  return `- Launchpads: ${items.join('; ')}${suffix}`;
 }
 
 function unavailableNames(input: RecapInput): string[] {
@@ -232,7 +278,10 @@ function unavailableNames(input: RecapInput): string[] {
   );
 
   for (const launchpad of input.activity.launchpads) {
-    entries.push({ name: `${launchpad.slug} DEX volume`, metric: launchpad.value });
+    entries.push({
+      name: `${launchpadName(launchpad.slug)} DEX volume`,
+      metric: launchpad.value,
+    });
   }
 
   const missing: string[] = [];
@@ -248,8 +297,25 @@ function unavailableNames(input: RecapInput): string[] {
   return missing;
 }
 
+function hasWeekendVolumeReference(input: RecapInput): boolean {
+  if (isWeekend(input.asOf)) return true;
+  if (
+    finiteOrNull(input.activity.dexVolumeVsMean7d.value) !== null &&
+    isWeekend(dataOf(input.activity.dexVolumeVsMean7d))
+  ) {
+    return true;
+  }
+  return input.activity.launchpads.some(
+    (item) =>
+      finiteOrNull(item.value.value) !== null && isWeekend(dataOf(item.value))
+  );
+}
+
 function dataNoteLines(input: RecapInput): string[] {
   const lines: string[] = [...DATA_NOTES];
+  if (hasWeekendVolumeReference(input)) {
+    lines.push(RECAP_WEEKEND_VOLUME_NOTE);
+  }
   const missing = unavailableNames(input);
   if (missing.length > 0) {
     lines.push(`Not available: ${missing.join(', ')}`);
@@ -259,7 +325,6 @@ function dataNoteLines(input: RecapInput): string[] {
 
 export function formatRecap(input: RecapInput): string {
   const date = typeof input.asOf === 'string' && input.asOf.length > 0 ? input.asOf : 'n/a';
-  const dexAsOf = dataOf(input.activity.dexVolumeVsMean7d);
 
   const lines = [
     `# SOL Daily Recap: ${date}`,
@@ -280,10 +345,6 @@ export function formatRecap(input: RecapInput): string {
     '**Solana activity**',
     `- ${metricText('DEX volume vs 7d mean', formatPercent(input.activity.dexVolumeVsMean7d), input.activity.dexVolumeVsMean7d, input.asOf)}`,
   ];
-
-  if (isWeekend(dexAsOf)) {
-    lines.push(RECAP_WEEKEND_DEX_NOTE);
-  }
 
   lines.push(
     launchpadLine(input),

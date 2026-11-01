@@ -2,11 +2,13 @@
 
 import {
   DATA_NOTES,
+  LAUNCHPAD_LABELS,
   RECAP_FOOTER,
-  RECAP_WEEKEND_DEX_NOTE,
+  RECAP_WEEKEND_VOLUME_NOTE,
   REGIME_LABELS,
   formatRecap,
   type RecapInput,
+  type RecapLaunchpad,
   type RecapMetric,
 } from '../recap/recap-format';
 import { PRICE_ASSET_IDS, readRecapInput } from '../recap/recap-reader';
@@ -27,6 +29,40 @@ function metric(
   dataAsOf: string | null = null
 ): RecapMetric {
   return { value, unit, asOf, dataAsOf };
+}
+
+function lineStarting(text: string, prefix: string): string {
+  return text.split('\n').find((line) => line.startsWith(prefix)) ?? '';
+}
+
+function dataNotesBlock(text: string): string {
+  const start = text.indexOf('**Data notes**');
+  const end = text.indexOf('\n---', start);
+  if (start < 0 || end < 0) return '';
+  return text.slice(start, end);
+}
+
+function countOccurrences(text: string, value: string): number {
+  return text.split(value).length - 1;
+}
+
+function launchpadsWithData(
+  input: RecapInput,
+  dates: readonly [string, string, string, string],
+  value = 0.01
+): void {
+  const slugs = [
+    'pump.fun',
+    'pumpswap',
+    'launchlab',
+    'meteora-dynamic-bonding-curve',
+  ] as const;
+  input.activity.launchpads = slugs.map(
+    (slug, index): RecapLaunchpad => ({
+      slug,
+      value: metric(value, 'FRACTION', input.asOf, dates[index]),
+    })
+  );
 }
 
 function sample(): RecapInput {
@@ -83,9 +119,9 @@ const lower = text.toLowerCase();
 check('título com a data', text.startsWith('# SOL Daily Recap: 2026-10-17\n'));
 check(
   'bloco Price preservado',
-  text.includes('- SOL: $150.25, 1d +1.23% (2026-10-16), 7d -4.56%') &&
+    text.includes('- SOL: $150.25, 1d +1.23% (2026-10-16), 7d -4.56%') &&
     text.includes('- BTC: n/a, 1d n/a, 7d +0.10%') &&
-    text.includes('- ETH: $3000.00 (2026-10-16), 1d +2.00%, 7d 0.00%')
+    text.includes('- ETH: $3,000.00 (2026-10-16), 1d +2.00%, 7d 0.00%')
 );
 check(
   'liquidação como % da média dos 7 dias, sem sinal',
@@ -117,7 +153,7 @@ check(
 check(
   'data notes fixas sem nomes internos',
   DATA_NOTES.every((line) => text.includes(line)) &&
-    text.includes('Not available: BTC price, BTC 1-day return, pumpswap DEX volume') &&
+    text.includes('Not available: BTC price, BTC 1-day return, PumpSwap DEX volume') &&
     !text.includes('return_1d') &&
     !text.includes('liq_total')
 );
@@ -158,23 +194,231 @@ const unknownRegime = sample();
 unknownRegime.regime = { regimeId: 'custom_regime', reason: null };
 check('regime desconhecido como veio', formatRecap(unknownRegime).includes('- Regime: custom_regime'));
 
+const priceThousands = sample();
+priceThousands.asOf = '2026-10-19';
+priceThousands.prices[0].priceUsd = metric(77474.08, 'USD', '2026-10-17');
+priceThousands.prices[1].priceUsd = metric(2254.13, 'USD', '2026-10-17');
+priceThousands.prices[2].priceUsd = metric(95.42, 'USD', '2026-10-17');
+const priceThousandsText = formatRecap(priceThousands);
 check(
-  'sem nota de fim de semana quando o dado é sexta-feira',
-  !text.includes(RECAP_WEEKEND_DEX_NOTE)
+  'preço de 5 dígitos usa separador de milhar en-US',
+  priceThousandsText.includes('- SOL: $77,474.08') &&
+    !priceThousandsText.includes('$77474.08')
+);
+check(
+  'preço de 4 dígitos usa separador de milhar en-US',
+  priceThousandsText.includes('- BTC: $2,254.13')
+);
+check(
+  'preço de 2 dígitos não recebe separador',
+  priceThousandsText.includes('- ETH: $95.42')
 );
 
-const weekend = sample();
-weekend.activity.dexVolumeVsMean7d = metric(0.05, 'FRACTION', '2026-10-17', '2026-10-17');
+const priceThreeDigits = sample();
+priceThreeDigits.asOf = '2026-10-19';
+priceThreeDigits.prices[0].priceUsd = metric(954.42, 'USD', '2026-10-17');
 check(
-  'nota de fim de semana só quando o dado é sábado ou domingo',
-  formatRecap(weekend).includes(RECAP_WEEKEND_DEX_NOTE)
+  'preço de 3 dígitos mantém 2 casas sem separador',
+  formatRecap(priceThreeDigits).includes('- SOL: $954.42')
 );
 
-const weekDay = sample();
-weekDay.activity.dexVolumeVsMean7d = metric(0.05, 'FRACTION', '2026-10-17', '2026-10-19');
+const namedLaunchpads = sample();
+namedLaunchpads.asOf = '2026-10-19';
+launchpadsWithData(namedLaunchpads, [
+  '2026-10-17',
+  '2026-10-17',
+  '2026-10-17',
+  '2026-10-17',
+]);
+const namedLaunchpadsText = formatRecap(namedLaunchpads);
+const namedLaunchpadLine = lineStarting(
+  namedLaunchpadsText,
+  '- Launchpads:'
+);
+check(
+  'nomes legíveis dos 4 launchpads',
+  namedLaunchpadLine.includes('pump.fun +1.00%') &&
+    namedLaunchpadLine.includes('PumpSwap +1.00%') &&
+    namedLaunchpadLine.includes('LaunchLab +1.00%') &&
+    namedLaunchpadLine.includes('Meteora DBC +1.00%')
+);
+check(
+  'slugs brutos não aparecem na linha',
+  !namedLaunchpadLine.includes('pumpswap ') &&
+    !namedLaunchpadLine.includes('launchlab ') &&
+    !namedLaunchpadLine.includes('meteora-dynamic-bonding-curve')
+);
+check(
+  'mapa de launchpads é o esperado',
+  LAUNCHPAD_LABELS['pump.fun'] === 'pump.fun' &&
+    LAUNCHPAD_LABELS.pumpswap === 'PumpSwap' &&
+    LAUNCHPAD_LABELS.launchlab === 'LaunchLab' &&
+    LAUNCHPAD_LABELS['meteora-dynamic-bonding-curve'] === 'Meteora DBC'
+);
+check(
+  'saída com nomes legíveis sem underline ou palavras proibidas',
+  !namedLaunchpadsText.includes('_') &&
+    forbidden.every(
+      (word) => !namedLaunchpadsText.toLowerCase().includes(word)
+    )
+);
+
+const unknownLaunchpad = sample();
+unknownLaunchpad.asOf = '2026-10-19';
+unknownLaunchpad.activity.launchpads = [
+  {
+    slug: 'otherpad',
+    value: metric(0.01, 'FRACTION', '2026-10-19', '2026-10-17'),
+  },
+];
+check(
+  'slug desconhecido aparece como veio',
+  lineStarting(formatRecap(unknownLaunchpad), '- Launchpads:').includes(
+    'otherpad +1.00%'
+  )
+);
+
+const sameDataDates = sample();
+sameDataDates.asOf = '2026-10-19';
+launchpadsWithData(sameDataDates, [
+  '2026-10-17',
+  '2026-10-17',
+  '2026-10-17',
+  '2026-10-17',
+]);
+const sameDataLine = lineStarting(
+  formatRecap(sameDataDates),
+  '- Launchpads:'
+);
+check(
+  'data única aparece uma vez no fim da linha',
+  sameDataLine.endsWith(' (data as of 2026-10-17)') &&
+    countOccurrences(sameDataLine, '(data as of') === 1
+);
+
+const differentDataDates = sample();
+differentDataDates.asOf = '2026-10-19';
+launchpadsWithData(differentDataDates, [
+  '2026-10-16',
+  '2026-10-17',
+  '2026-10-16',
+  '2026-10-17',
+]);
+const differentDataLine = lineStarting(
+  formatRecap(differentDataDates),
+  '- Launchpads:'
+);
+check(
+  'datas diferentes mantêm data por item',
+  countOccurrences(differentDataLine, '(data as of') === 4 &&
+    differentDataLine.includes('pump.fun +1.00% (data as of 2026-10-16)') &&
+    differentDataLine.includes('PumpSwap +1.00% (data as of 2026-10-17)')
+);
+
+const saturday = sample();
+saturday.asOf = '2026-10-31';
+saturday.activity.dexVolumeVsMean7d = metric(
+  0.05,
+  'FRACTION',
+  '2026-10-31',
+  '2026-10-30'
+);
+launchpadsWithData(saturday, [
+  '2026-10-30',
+  '2026-10-30',
+  '2026-10-30',
+  '2026-10-30',
+]);
+const saturdayText = formatRecap(saturday);
+check(
+  'nota de fim de semana no sábado',
+  dataNotesBlock(saturdayText).includes(RECAP_WEEKEND_VOLUME_NOTE) &&
+    countOccurrences(saturdayText, RECAP_WEEKEND_VOLUME_NOTE) === 1
+);
+
+const sunday = sample();
+sunday.asOf = '2026-11-01';
+sunday.activity.dexVolumeVsMean7d = metric(
+  0.05,
+  'FRACTION',
+  '2026-11-01',
+  '2026-10-30'
+);
+launchpadsWithData(sunday, [
+  '2026-10-30',
+  '2026-10-30',
+  '2026-10-30',
+  '2026-10-30',
+]);
+const sundayText = formatRecap(sunday);
+check(
+  'nota de fim de semana no domingo',
+  dataNotesBlock(sundayText).includes(RECAP_WEEKEND_VOLUME_NOTE) &&
+    countOccurrences(sundayText, RECAP_WEEKEND_VOLUME_NOTE) === 1
+);
+
+const monday = sample();
+monday.asOf = '2026-11-02';
+monday.activity.dexVolumeVsMean7d = metric(
+  0.05,
+  'FRACTION',
+  '2026-11-02',
+  '2026-10-30'
+);
+launchpadsWithData(monday, [
+  '2026-10-30',
+  '2026-10-30',
+  '2026-10-30',
+  '2026-10-30',
+]);
 check(
   'sem nota de fim de semana na segunda-feira',
-  !formatRecap(weekDay).includes(RECAP_WEEKEND_DEX_NOTE)
+  !formatRecap(monday).includes(RECAP_WEEKEND_VOLUME_NOTE)
+);
+
+const mondayDexSaturday = sample();
+mondayDexSaturday.asOf = '2026-11-02';
+mondayDexSaturday.activity.dexVolumeVsMean7d = metric(
+  0.05,
+  'FRACTION',
+  '2026-11-02',
+  '2026-10-31'
+);
+launchpadsWithData(mondayDexSaturday, [
+  '2026-10-30',
+  '2026-10-30',
+  '2026-10-30',
+  '2026-10-30',
+]);
+const mondayDexSaturdayText = formatRecap(mondayDexSaturday);
+check(
+  'nota de fim de semana quando o dado de DEX cai no sábado',
+  dataNotesBlock(mondayDexSaturdayText).includes(
+    RECAP_WEEKEND_VOLUME_NOTE
+  ) && countOccurrences(mondayDexSaturdayText, RECAP_WEEKEND_VOLUME_NOTE) === 1
+);
+
+const mondayLaunchpadSunday = sample();
+mondayLaunchpadSunday.asOf = '2026-11-02';
+mondayLaunchpadSunday.activity.dexVolumeVsMean7d = metric(
+  0.05,
+  'FRACTION',
+  '2026-11-02',
+  '2026-10-30'
+);
+launchpadsWithData(mondayLaunchpadSunday, [
+  '2026-11-01',
+  '2026-11-01',
+  '2026-11-01',
+  '2026-11-01',
+]);
+const mondayLaunchpadSundayText = formatRecap(mondayLaunchpadSunday);
+check(
+  'nota de fim de semana quando o dado de launchpad cai no domingo',
+  dataNotesBlock(mondayLaunchpadSundayText).includes(
+    RECAP_WEEKEND_VOLUME_NOTE
+  ) &&
+    countOccurrences(mondayLaunchpadSundayText, RECAP_WEEKEND_VOLUME_NOTE) === 1
 );
 
 const complete = sample();
@@ -305,8 +549,8 @@ async function runReaderChecks(): Promise<void> {
   check(
     'saída continua mostrando SOL, BTC e ETH',
     rendered.includes('- SOL: $150.00') &&
-      rendered.includes('- BTC: $60000.00') &&
-      rendered.includes('- ETH: $3000.00')
+      rendered.includes('- BTC: $60,000.00') &&
+      rendered.includes('- ETH: $3,000.00')
   );
 }
 
