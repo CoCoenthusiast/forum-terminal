@@ -182,9 +182,30 @@ check(
 );
 check(
   'U.S. Treasury e Federal Reserve ficam sem endereço',
-  RECAP_FOOTER.includes(', U.S. Treasury, Federal Reserve.') &&
+  RECAP_FOOTER.includes('| U.S. Treasury | Federal Reserve.') &&
     !RECAP_FOOTER.includes('Treasury (') &&
     !RECAP_FOOTER.includes('Reserve (')
+);
+check(
+  'URLs da saída não terminam em pontuação',
+  (() => {
+    const urls = text.match(/https?:\/\/\S+/g) ?? [];
+    return (
+      urls.length === 3 &&
+      urls.every((url) => !/[),;.]$/.test(url))
+    );
+  })()
+);
+check(
+  'cada URL é seguida de espaço',
+  (() => {
+    const urls = text.match(/https?:\/\/\S+/g) ?? [];
+    return urls.every((url) => {
+      const index = text.indexOf(url);
+      const next = text[index + url.length] ?? '';
+      return next === ' ';
+    });
+  })()
 );
 check(
   'rodapé sem palavras proibidas',
