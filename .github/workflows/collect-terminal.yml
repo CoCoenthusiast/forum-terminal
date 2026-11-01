@@ -19,7 +19,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
       - run: npm ci
         env:
           DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
