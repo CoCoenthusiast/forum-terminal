@@ -1,5 +1,5 @@
 export const RECAP_FOOTER =
-  'Data: CoinGecko (Powered by CoinGecko), DefiLlama, Coinalyze, U.S. Treasury, Federal Reserve. Informational only, not financial advice. Draft generated automatically; reviewed before posting.';
+  'Data: CoinGecko (Powered by CoinGecko, https://www.coingecko.com), DefiLlama (https://defillama.com), Coinalyze (https://coinalyze.net), U.S. Treasury, Federal Reserve. Informational only, not financial advice. Draft generated automatically; reviewed before posting.';
 
 export const RECAP_WEEKEND_VOLUME_NOTE =
   'Volume comparisons tend to read lower on Saturdays and Sundays.';

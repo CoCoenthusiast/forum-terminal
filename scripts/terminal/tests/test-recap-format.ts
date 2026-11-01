@@ -170,6 +170,27 @@ check(
 );
 check('linha em branco e separador antes do rodapé', text.includes(`\n\n---\n\n${RECAP_FOOTER}`));
 check('rodapé fixo', text.endsWith(RECAP_FOOTER));
+check(
+  'rodapé contém as três URLs das fontes',
+  RECAP_FOOTER.includes('https://www.coingecko.com') &&
+    RECAP_FOOTER.includes('https://defillama.com') &&
+    RECAP_FOOTER.includes('https://coinalyze.net')
+);
+check(
+  'rodapé mantém Powered by CoinGecko',
+  RECAP_FOOTER.includes('Powered by CoinGecko')
+);
+check(
+  'U.S. Treasury e Federal Reserve ficam sem endereço',
+  RECAP_FOOTER.includes(', U.S. Treasury, Federal Reserve.') &&
+    !RECAP_FOOTER.includes('Treasury (') &&
+    !RECAP_FOOTER.includes('Reserve (')
+);
+check(
+  'rodapé sem palavras proibidas',
+  forbidden.every((word) => !RECAP_FOOTER.toLowerCase().includes(word)),
+  forbidden.filter((word) => RECAP_FOOTER.toLowerCase().includes(word)).join(',')
+);
 check('texto determinístico', formatRecap(sample()) === text);
 
 const expectedRegimes: Record<string, string> = {
