@@ -23,7 +23,19 @@ interface IndicatorTarget {
   formulaVersion: string;
 }
 
-const PRICE_ASSETS = ['SOL', 'BTC', 'ETH'] as const;
+export const PRICE_ASSET_IDS = {
+  SOL: 'solana',
+  BTC: 'bitcoin',
+  ETH: 'ethereum',
+} as const;
+
+export type PriceAssetLabel = keyof typeof PRICE_ASSET_IDS;
+
+export const PRICE_ASSET_LABELS = Object.keys(
+  PRICE_ASSET_IDS
+) as PriceAssetLabel[];
+
+const PRICE_ASSET_ID_SET = new Set<string>(Object.values(PRICE_ASSET_IDS));
 const LEVERAGE_SCOPE = 'coinalyze:SOL';
 const MACRO_SCOPE = 'macro:us';
 
@@ -37,17 +49,17 @@ function target(
 }
 
 const TARGETS: IndicatorTarget[] = [
-  ...PRICE_ASSETS.flatMap((asset) => [
+  ...PRICE_ASSET_LABELS.flatMap((asset) => [
     target(
       `return1d|${asset}`,
       'return_1d',
-      asset.toLowerCase(),
+      PRICE_ASSET_IDS[asset],
       RETURN_FORMULA_VERSION
     ),
     target(
       `return7d|${asset}`,
       'return_7d',
-      asset.toLowerCase(),
+      PRICE_ASSET_IDS[asset],
       RETURN_FORMULA_VERSION
     ),
   ]),
@@ -110,6 +122,7 @@ export interface IndicatorReadRow {
   value: unknown;
   unit: string;
   asOf: Date;
+  toDate: Date | null;
   formulaVersion: string;
 }
 
@@ -205,6 +218,7 @@ export function latestMetrics(
       value: numberOrNull(row.value),
       unit: row.unit,
       asOf,
+      dataAsOf: row.toDate === null ? null : row.toDate.toISOString().slice(0, 10),
     });
   }
 
@@ -258,9 +272,9 @@ export function recapInputFromRows(
     return metrics.get(targetKey(item)) ?? emptyMetric();
   };
 
-  const prices: RecapPrice[] = PRICE_ASSETS.map((asset) => ({
+  const prices: RecapPrice[] = PRICE_ASSET_LABELS.map((asset) => ({
     asset,
-    priceUsd: priceFromRows(priceRowsByAsset[asset.toLowerCase()] ?? [], asOf),
+    priceUsd: priceFromRows(priceRowsByAsset[PRICE_ASSET_IDS[asset]] ?? [], asOf),
     return1d: metric(`return1d|${asset}`),
     return7d: metric(`return7d|${asset}`),
   }));
@@ -310,7 +324,7 @@ export async function readRecapInput(
 
   const priceRows = await client.marketSnapshot.findMany({
     where: {
-      asset: { in: PRICE_ASSETS.map((asset) => asset.toLowerCase()) },
+      asset: { in: PRICE_ASSET_LABELS.map((asset) => PRICE_ASSET_IDS[asset]) },
       collectedAt: {
         gte: new Date(asOfDate.getTime() - PRICE_LOOKBACK_DAYS * DAY_MS),
         lte: new Date(asOfDate.getTime() + DAY_MS),
@@ -327,7 +341,8 @@ export async function readRecapInput(
 
   const priceRowsByAsset: Record<string, MarketPriceReadRow[]> = {};
   for (const row of priceRows) {
-    const asset = row.asset.toLowerCase();
+    const asset = row.asset;
+    if (!PRICE_ASSET_ID_SET.has(asset)) continue;
     priceRowsByAsset[asset] = priceRowsByAsset[asset] ?? [];
     priceRowsByAsset[asset].push({
       provider: row.source.provider,
@@ -353,6 +368,7 @@ export async function readRecapInput(
       value: true,
       unit: true,
       asOf: true,
+      toDate: true,
       formulaVersion: true,
     },
     orderBy: { asOf: 'desc' },

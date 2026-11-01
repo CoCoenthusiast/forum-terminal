@@ -4,10 +4,29 @@ export const RECAP_FOOTER =
 export const RECAP_WEEKEND_DEX_NOTE =
   'DEX volume has tended to read about 15 to 20% below its 7-day average on Saturdays and Sundays (calendar effect).';
 
+export const REGIME_LABELS: Readonly<Record<string, string>> = {
+  trend_up_confirmed: 'Uptrend, confirmed',
+  trend_up_unconfirmed: 'Uptrend, unconfirmed',
+  range_neutral: 'Range, neutral',
+  trend_down_unconfirmed: 'Downtrend, unconfirmed',
+  trend_down_confirmed: 'Downtrend, confirmed',
+  weak_without_trend: 'Weak, no trend',
+  strong_without_trend: 'Strong, no trend',
+  conflicting: 'Conflicting signals',
+  insufficient_data: 'Insufficient data',
+};
+
+export const DATA_NOTES = [
+  'n/a means the value was not available.',
+  'DEX and launchpad data arrive with a 2-day delay.',
+  'Broad dollar data can arrive with a delay of more than a week.',
+] as const;
+
 export interface RecapMetric {
   value: number | null;
   unit?: string | null;
   asOf?: string | null;
+  dataAsOf?: string | null;
 }
 
 export interface RecapPrice {
@@ -82,6 +101,10 @@ function finiteOrNull(value: number | null | undefined): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function toPercent(value: number, unit: string | null | undefined): number {
+  return unit?.toUpperCase() === 'FRACTION' ? value * 100 : value;
+}
+
 function formatUsd(metric: RecapMetric | null | undefined): string {
   const value = finiteOrNull(metric?.value);
   if (value === null) return 'n/a';
@@ -92,13 +115,34 @@ function formatPercent(metric: RecapMetric | null | undefined): string {
   const value = finiteOrNull(metric?.value);
   if (value === null) return 'n/a';
 
-  const unit = metric?.unit?.toUpperCase() ?? null;
-  const percent = unit === 'FRACTION' ? value * 100 : value;
-  const rounded = Math.round(percent * 100) / 100;
+  const rounded = Math.round(toPercent(value, metric?.unit) * 100) / 100;
   if (rounded === 0) return '0.00%';
 
   const sign = rounded > 0 ? '+' : '';
   return `${sign}${rounded.toFixed(2)}%`;
+}
+
+function formatSignedFixed(
+  metric: RecapMetric | null | undefined,
+  decimals: number,
+  suffix: string,
+  convertFraction: boolean
+): string {
+  const value = finiteOrNull(metric?.value);
+  if (value === null) return 'n/a';
+
+  const base = convertFraction ? toPercent(value, metric?.unit) : value;
+  const factor = 10 ** decimals;
+  const rounded = Math.round(base * factor) / factor;
+  const normalized = rounded === 0 ? 0 : rounded;
+  const sign = normalized > 0 ? '+' : '';
+  return `${sign}${normalized.toFixed(decimals)}${suffix}`;
+}
+
+function formatRatio(metric: RecapMetric | null | undefined): string {
+  const value = finiteOrNull(metric?.value);
+  if (value === null) return 'n/a';
+  return `${toPercent(value, metric?.unit).toFixed(1)}%`;
 }
 
 function dateSuffix(metric: RecapMetric | null | undefined, recapAsOf: string): string {
@@ -108,12 +152,28 @@ function dateSuffix(metric: RecapMetric | null | undefined, recapAsOf: string): 
   return ` (${asOf})`;
 }
 
-function metricText(
-  label: string,
+function dataOf(metric: RecapMetric | null | undefined): string | null {
+  const value = metric?.dataAsOf ?? metric?.asOf;
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function dataAsOfSuffix(
   metric: RecapMetric | null | undefined,
   recapAsOf: string
 ): string {
-  return `${label}: ${formatPercent(metric)}${dateSuffix(metric, recapAsOf)}`;
+  if (finiteOrNull(metric?.value) === null) return '';
+  const dataAsOf = dataOf(metric);
+  if (dataAsOf === null || dataAsOf >= recapAsOf) return '';
+  return ` (data as of ${dataAsOf})`;
+}
+
+function metricText(
+  label: string,
+  formatted: string,
+  metric: RecapMetric | null | undefined,
+  recapAsOf: string
+): string {
+  return `${label}: ${formatted}${dataAsOfSuffix(metric, recapAsOf)}`;
 }
 
 function priceFor(input: RecapInput, asset: string): RecapPrice | null {
@@ -132,71 +192,74 @@ function regimeLine(regime: RecapRegime | null): string {
   const regimeId = regime?.regimeId;
   if (typeof regimeId !== 'string' || regimeId.length === 0) return '- Regime: n/a';
 
+  const label = REGIME_LABELS[regimeId] ?? regimeId;
   const reason = regime?.reason;
   if (typeof reason !== 'string' || reason.trim().length === 0) {
-    return `- Regime: ${regimeId}`;
+    return `- Regime: ${label}`;
   }
 
-  return `- Regime: ${regimeId}; ${reason}`;
+  return `- Regime: ${label}; ${reason}`;
 }
 
 function launchpadLine(input: RecapInput): string {
   if (input.activity.launchpads.length === 0) return '- Launchpads: n/a';
 
-  const items = input.activity.launchpads.map((item) =>
-    `${item.slug} ${formatPercent(item.value)}${dateSuffix(item.value, input.asOf)}`
-  );
+  const items = input.activity.launchpads.map((item) => {
+    const value = formatPercent(item.value);
+    return `${item.slug} ${value}${dataAsOfSuffix(item.value, input.asOf)}`;
+  });
   return `- Launchpads: ${items.join('; ')}`;
 }
 
-function olderSeries(input: RecapInput): string[] {
+function unavailableNames(input: RecapInput): string[] {
   const entries: { name: string; metric: RecapMetric }[] = [];
 
   for (const price of input.prices) {
-    entries.push({ name: `price_usd ${price.asset.toUpperCase()}`, metric: price.priceUsd });
-    entries.push({ name: `return_1d ${price.asset.toUpperCase()}`, metric: price.return1d });
-    entries.push({ name: `return_7d ${price.asset.toUpperCase()}`, metric: price.return7d });
+    const asset = price.asset.toUpperCase();
+    entries.push({ name: `${asset} price`, metric: price.priceUsd });
+    entries.push({ name: `${asset} 1-day return`, metric: price.return1d });
+    entries.push({ name: `${asset} 7-day return`, metric: price.return7d });
   }
 
   entries.push(
-    { name: 'oi_usd_change_7d_pct', metric: input.leverage.oiUsdChange7dPct },
-    { name: 'funding_7d_mean', metric: input.leverage.funding7dMean },
-    { name: 'liq_total_vs_mean7d_pct', metric: input.leverage.liqTotalVsMean7dPct },
-    { name: 'liq_long_share_pct', metric: input.leverage.liqLongSharePct },
-    { name: 'macro_dollar_broad_change_5d_pct', metric: input.macro.dollarBroadChange5dPct },
-    {
-      name: 'macro_real_yield_10y_change_5d',
-      metric: input.macro.realYield10yChange5d,
-    },
-    { name: 'dex_volume_vs_mean_7d', metric: input.activity.dexVolumeVsMean7d }
+    { name: 'Open interest change', metric: input.leverage.oiUsdChange7dPct },
+    { name: 'Funding', metric: input.leverage.funding7dMean },
+    { name: 'Liquidations', metric: input.leverage.liqTotalVsMean7dPct },
+    { name: 'Long liquidation share', metric: input.leverage.liqLongSharePct },
+    { name: 'Broad dollar', metric: input.macro.dollarBroadChange5dPct },
+    { name: 'Real yield', metric: input.macro.realYield10yChange5d },
+    { name: 'DEX volume', metric: input.activity.dexVolumeVsMean7d }
   );
 
   for (const launchpad of input.activity.launchpads) {
-    entries.push({
-      name: `launchpad_dex_volume_vs_mean_7d ${launchpad.slug}`,
-      metric: launchpad.value,
-    });
+    entries.push({ name: `${launchpad.slug} DEX volume`, metric: launchpad.value });
   }
 
+  const missing: string[] = [];
   const seen = new Set<string>();
-  const notes: string[] = [];
 
   for (const entry of entries) {
-    const asOf = entry.metric.asOf;
-    if (typeof asOf !== 'string' || asOf.length === 0 || asOf >= input.asOf) continue;
-    const note = `${entry.name} (${asOf})`;
-    if (seen.has(note)) continue;
-    seen.add(note);
-    notes.push(note);
+    if (finiteOrNull(entry.metric.value) !== null) continue;
+    if (seen.has(entry.name)) continue;
+    seen.add(entry.name);
+    missing.push(entry.name);
   }
 
-  return notes;
+  return missing;
+}
+
+function dataNoteLines(input: RecapInput): string[] {
+  const lines: string[] = [...DATA_NOTES];
+  const missing = unavailableNames(input);
+  if (missing.length > 0) {
+    lines.push(`Not available: ${missing.join(', ')}`);
+  }
+  return lines;
 }
 
 export function formatRecap(input: RecapInput): string {
   const date = typeof input.asOf === 'string' && input.asOf.length > 0 ? input.asOf : 'n/a';
-  const notes = olderSeries(input);
-  const dexAsOf = input.activity.dexVolumeVsMean7d.asOf;
+  const dexAsOf = dataOf(input.activity.dexVolumeVsMean7d);
 
   const lines = [
     `# SOL Daily Recap: ${date}`,
@@ -208,14 +271,14 @@ export function formatRecap(input: RecapInput): string {
     regimeLine(input.regime),
     '',
     '**Leverage, SOL (Coinalyze)**',
-    `- ${metricText('OI 7d', input.leverage.oiUsdChange7dPct, input.asOf)}; ${metricText('Funding 7d mean', input.leverage.funding7dMean, input.asOf)}`,
-    `- ${metricText('Liquidation total vs 7d mean', input.leverage.liqTotalVsMean7dPct, input.asOf)}; ${metricText('Long liquidation share', input.leverage.liqLongSharePct, input.asOf)}`,
+    `- ${metricText('OI 7d', formatPercent(input.leverage.oiUsdChange7dPct), input.leverage.oiUsdChange7dPct, input.asOf)}; ${metricText('Funding 7d mean', formatSignedFixed(input.leverage.funding7dMean, 4, '%', true), input.leverage.funding7dMean, input.asOf)}`,
+    `- ${metricText('Liquidations', `${formatRatio(input.leverage.liqTotalVsMean7dPct)} of the 7-day average`, input.leverage.liqTotalVsMean7dPct, input.asOf)}; Longs were ${formatRatio(input.leverage.liqLongSharePct)} of liquidations${dataAsOfSuffix(input.leverage.liqLongSharePct, input.asOf)}`,
     '',
     '**Macro (US)**',
-    `- ${metricText('Broad dollar 5d', input.macro.dollarBroadChange5dPct, input.asOf)}; ${metricText('Real yield 10y 5d', input.macro.realYield10yChange5d, input.asOf)}`,
+    `- ${metricText('Broad dollar 5d', formatPercent(input.macro.dollarBroadChange5dPct), input.macro.dollarBroadChange5dPct, input.asOf)}; ${metricText('Real yield 10y 5d', formatSignedFixed(input.macro.realYield10yChange5d, 2, ' pp', false), input.macro.realYield10yChange5d, input.asOf)}`,
     '',
     '**Solana activity**',
-    `- ${metricText('DEX volume vs 7d mean', input.activity.dexVolumeVsMean7d, input.asOf)}`,
+    `- ${metricText('DEX volume vs 7d mean', formatPercent(input.activity.dexVolumeVsMean7d), input.activity.dexVolumeVsMean7d, input.asOf)}`,
   ];
 
   if (isWeekend(dexAsOf)) {
@@ -226,7 +289,10 @@ export function formatRecap(input: RecapInput): string {
     launchpadLine(input),
     '',
     '**Data notes**',
-    `- ${notes.length === 0 ? 'None.' : notes.join('; ')}`,
+    ...dataNoteLines(input),
+    '',
+    '---',
+    '',
     RECAP_FOOTER
   );
 
