@@ -1,5 +1,7 @@
 import { REGIME_LABELS, type RecapInput, type RecapMetric } from '../recap/recap-format';
 import { delayDays, type FreshnessResult, type FreshnessStatus } from '../checks/freshness-rules';
+import { latestValueText, renderLineChart } from './charts';
+import type { IndicatorSeries } from './series-reader';
 
 export const DASHBOARD_FOOTER =
   'Local read-only dashboard. Data: CoinGecko, DefiLlama, Coinalyze, U.S. Treasury, Federal Reserve. Not financial advice.';
@@ -115,13 +117,18 @@ tbody th { font-weight: 500; color: #cfd8e3; }
 .warn { color: #e5c07b; font-weight: 600; }
 .fail { color: #f28b82; font-weight: 600; }
 .muted { color: #9aa4b2; }
+.notice { padding: 10px 12px; border-left: 3px solid #8ab4f8; background: #161b22; color: #cfd8e3; }
+article.chart { margin-bottom: 24px; }
+article.chart h3 { font-size: 15px; margin: 0 0 2px; color: #cfd8e3; }
+article.chart p { margin: 0 0 8px; }
+svg.chart { display: block; width: 100%; max-width: 900px; height: auto; border: 1px solid #262b33; border-radius: 6px; }
 footer { padding: 16px 24px 28px; border-top: 1px solid #262b33; color: #9aa4b2; font-size: 13px; }
 </style>
 </head>
 <body>
 <header>
 <h1>SOL Terminal Dashboard</h1>
-<nav><a href="/">Overview</a><a href="/health">Data health</a></nav>
+<nav><a href="/">Overview</a><a href="/health">Data health</a><a href="/leverage-macro">Leverage &amp; macro</a></nav>
 </header>
 <main>
 ${body}
@@ -194,4 +201,39 @@ export function renderDataHealth(
 </section>`;
 
   return renderPage('Data health', body);
+}
+
+function chartArticle(series: IndicatorSeries): string {
+  return `<article class="chart">
+<h3>${escapeHtml(series.indicator)} <span class="muted">${escapeHtml(
+    latestValueText(series)
+  )}</span></h3>
+<p class="muted">${escapeHtml(series.scope)} · ${escapeHtml(series.formulaVersion)}</p>
+${renderLineChart(series)}
+</article>`;
+}
+
+export function renderLeverageMacro(
+  leverage: readonly IndicatorSeries[],
+  macro: readonly IndicatorSeries[]
+): string {
+  const leverageCharts =
+    leverage.length === 0 ? '<p>n/a</p>' : leverage.map(chartArticle).join('\n');
+  const macroCharts =
+    macro.length === 0 ? '<p>n/a</p>' : macro.map(chartArticle).join('\n');
+
+  const body = `<section>
+<h2>Leverage &amp; macro</h2>
+<p class="notice">Coinalyze leverage data is aggregated across exchanges; macro series have publication delays.</p>
+</section>
+<section>
+<h2>Leverage, SOL (Coinalyze)</h2>
+${leverageCharts}
+</section>
+<section>
+<h2>Macro (US)</h2>
+${macroCharts}
+</section>`;
+
+  return renderPage('Leverage & macro', body);
 }

@@ -4,7 +4,9 @@ import { request } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDashboardServer, HOST } from './server';
-import { DASHBOARD_FOOTER, renderDataHealth, renderOverview } from './pages';
+import { DASHBOARD_FOOTER, renderDataHealth, renderLeverageMacro, renderOverview } from './pages';
+import { latestValueText, renderLineChart } from './charts';
+import type { IndicatorSeries } from './series-reader';
 import type { RecapInput, RecapMetric } from '../recap/recap-format';
 
 let passed = 0;
@@ -43,6 +45,18 @@ function emptyInput(): RecapInput {
       dexVolumeVsMean7d: metric(null),
       launchpads: [],
     },
+  };
+}
+
+function emptySeries(indicator: string, scope: string, unit: string): IndicatorSeries {
+  return {
+    indicator,
+    scope,
+    formulaVersion: 'test_v1',
+    unit,
+    from: '2026-01-01',
+    to: '2026-03-31',
+    points: [],
   };
 }
 
@@ -100,6 +114,43 @@ async function main(): Promise<void> {
   check('overview never turns missing prices into zero', !overview.includes('$0.00'));
   check('overview shows SOL, BTC and ETH', ['SOL', 'BTC', 'ETH'].every((asset) => overview.includes(`>${asset}<`)));
   check('overview has the dashboard footer', overview.includes(DASHBOARD_FOOTER));
+  check('overview links to leverage & macro', overview.includes('href="/leverage-macro"'));
+
+  const leveragePage = renderLeverageMacro(
+    [emptySeries('oi_usd_change_1d_pct', 'coinalyze:SOL', 'PERCENT')],
+    []
+  );
+  check('leverage & macro page shows n/a for an empty series', leveragePage.includes('n/a'));
+  check(
+    'leverage & macro page has the delay notice',
+    leveragePage.includes(
+      'Coinalyze leverage data is aggregated across exchanges; macro series have publication delays.'
+    )
+  );
+  check('leverage & macro page has the dashboard footer', leveragePage.includes(DASHBOARD_FOOTER));
+
+  const gapSeries: IndicatorSeries = {
+    indicator: 'gap_test',
+    scope: 'test',
+    formulaVersion: 'test_v1',
+    unit: 'PERCENT',
+    from: '2026-01-01',
+    to: '2026-01-05',
+    points: [
+      { date: '2026-01-01', value: 1 },
+      { date: '2026-01-02', value: 2 },
+      { date: '2026-01-04', value: 4 },
+      { date: '2026-01-05', value: 5 },
+    ],
+  };
+  const gapChart = renderLineChart(gapSeries);
+  const segmentCount = (gapChart.match(/class="chart-line"/g) ?? []).length;
+  check('a gap splits the line into two segments', segmentCount === 2);
+  check('a gap never becomes a zero point', !gapChart.includes('data-value="0"'));
+  check(
+    'the chart title data shows the last value and date',
+    latestValueText(gapSeries).includes('5') && latestValueText(gapSeries).includes('2026-01-05')
+  );
 
   const health = renderDataHealth([], 'FAIL', '2026-11-01');
   check('data health shows the overall result', health.includes('FAIL'));

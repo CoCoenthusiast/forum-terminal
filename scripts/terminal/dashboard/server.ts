@@ -16,15 +16,21 @@ import {
   type FreshnessInput,
 } from '../checks/freshness-rules';
 import { PRICE_ASSET_IDS, readRecapInput } from '../recap/recap-reader';
-import { renderDataHealth, renderOverview } from './pages';
+import { COINALYZE_LEVERAGE_INDICATORS } from '../indicators/coinalyze-leverage-catalog';
+import {
+  MACRO_INDICATOR_FORMULA_VERSION,
+  MACRO_INDICATORS,
+} from '../indicators/macro-catalog';
+import { MACRO_SCOPE } from '../indicators/compute-macro-indicators';
+import { readIndicatorSeries, type SeriesTarget } from './series-reader';
+import { renderDataHealth, renderLeverageMacro, renderOverview } from './pages';
 
 export const HOST = '127.0.0.1';
 export const DEFAULT_PORT = 3000;
 
 const RETURN_FORMULA_VERSION = 'v1';
-const MACRO_FORMULA_VERSION = 'macro_v1';
+const MACRO_FORMULA_VERSION = MACRO_INDICATOR_FORMULA_VERSION;
 const COINALYZE_SCOPE = 'coinalyze:SOL';
-const MACRO_SCOPE = 'macro:us';
 
 type DashboardClient = PrismaClient;
 
@@ -196,6 +202,25 @@ async function readHealthInput(
   };
 }
 
+function leverageMacroTargets(): { leverage: SeriesTarget[]; macro: SeriesTarget[] } {
+  const leverage: SeriesTarget[] = COINALYZE_LEVERAGE_INDICATORS.filter(
+    (definition) => definition.coin === 'SOL'
+  ).map((definition) => ({
+    indicator: definition.indicator,
+    scope: definition.scope,
+    formulaVersion: definition.formulaVersion,
+    unit: definition.unit,
+  }));
+
+  const macro: SeriesTarget[] = MACRO_INDICATORS.map((definition) => ({
+    indicator: definition.indicator,
+    scope: MACRO_SCOPE,
+    formulaVersion: MACRO_INDICATOR_FORMULA_VERSION,
+  }));
+
+  return { leverage, macro };
+}
+
 function resolveDate(url: URL, now: Date): { date: string; error: string | null } {
   const value = url.searchParams.get('date');
   if (value === null) return { date: previousUtcDay(now), error: null };
@@ -250,6 +275,30 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const input = await readHealthInput(client, resolved.date, now);
     const results = evaluateFreshness(input);
     sendHtml(res, 200, renderDataHealth(results, worstStatus(results), resolved.date));
+    return;
+  }
+
+  if (url.pathname === '/leverage-macro') {
+    const resolved = resolveDate(url, now);
+    if (resolved.error !== null) {
+      sendText(res, 400, resolved.error);
+      return;
+    }
+    const client = await getClient();
+    const { leverage, macro } = leverageMacroTargets();
+    const series = await readIndicatorSeries(
+      client,
+      [...leverage, ...macro],
+      resolved.date
+    );
+    sendHtml(
+      res,
+      200,
+      renderLeverageMacro(
+        series.slice(0, leverage.length),
+        series.slice(leverage.length)
+      )
+    );
     return;
   }
 
