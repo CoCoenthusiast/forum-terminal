@@ -334,6 +334,17 @@ async function main(): Promise<void> {
   );
   check('tokens page has the dashboard footer', emptyTokensPage.includes(DASHBOARD_FOOTER));
 
+  const fullAddress = tokenSummary().address;
+  const tokenRowPage = renderTokens([tokenSummary()]);
+  check(
+    'token symbol links to the full address',
+    tokenRowPage.includes(`href="/tokens/${encodeURIComponent(fullAddress)}"`)
+  );
+  check(
+    'tokens table shows the full address',
+    tokenRowPage.includes(`<td class="token-address">${fullAddress}</td>`)
+  );
+
   const dirtyName = '\u202e<script>alert(1)</script>';
   const dirtyTokensPage = renderTokens([tokenSummary({ name: dirtyName })]);
   check('token names strip bidi controls', !dirtyTokensPage.includes('\u202e'));
@@ -341,6 +352,26 @@ async function main(): Promise<void> {
     'token names are HTML escaped',
     !dirtyTokensPage.includes('<script>') &&
       dirtyTokensPage.includes('&lt;script&gt;')
+  );
+
+  const specialAddress = 'abc<def&ghi';
+  const specialTokensPage = renderTokens([tokenSummary({ address: specialAddress })]);
+  check(
+    'special addresses are escaped in the table',
+    specialTokensPage.includes('abc&lt;def&amp;ghi') &&
+      !specialTokensPage.includes('<def')
+  );
+  check(
+    'special addresses are encoded in links',
+    specialTokensPage.includes(
+      `href="/tokens/${encodeURIComponent(specialAddress)}"`
+    )
+  );
+  check(
+    'special addresses are escaped in the detail',
+    renderTokenDetail(tokenDetail({ address: specialAddress })).includes(
+      'abc&lt;def&amp;ghi'
+    )
   );
 
   const latestAt = new Date('2026-11-02T12:00:00.000Z');
@@ -367,6 +398,10 @@ async function main(): Promise<void> {
 
   const emptyTokenDetail = renderTokenDetail(tokenDetail());
   check('token detail shows n/a for empty data', emptyTokenDetail.includes('n/a'));
+  check(
+    'token detail shows the full address',
+    emptyTokenDetail.includes(`<p class="muted token-address">${fullAddress}</p>`)
+  );
   check(
     'token detail has the raw numbers notice',
     emptyTokenDetail.includes(
@@ -400,6 +435,43 @@ async function main(): Promise<void> {
   const missingToken = await requestStatus(notFoundPort, 'GET', '/tokens/unknown');
   check('an unknown token address returns 404', missingToken.status === 404);
   await new Promise<void>((resolve) => notFoundServer.close(() => resolve()));
+
+  const detailClient = {
+    token: {
+      findFirst: async () => ({
+        address: fullAddress,
+        name: 'Test Token',
+        symbol: 'TEST',
+      }),
+    },
+    tokenCapture: {
+      findMany: async () => [],
+      findFirst: async () => null,
+    },
+  };
+  const detailServer = createDashboardServer({
+    getClient: async () => detailClient as never,
+  });
+  await new Promise<void>((resolve, reject) => {
+    detailServer.once('error', reject);
+    detailServer.listen(0, HOST, () => resolve());
+  });
+  const detailAddress = detailServer.address();
+  const detailPort =
+    detailAddress !== null && typeof detailAddress === 'object'
+      ? detailAddress.port
+      : 0;
+  const foundToken = await requestStatus(
+    detailPort,
+    'GET',
+    `/tokens/${encodeURIComponent(fullAddress)}`
+  );
+  check('a full token address returns 200', foundToken.status === 200);
+  check(
+    'the full token address detail shows the full address',
+    foundToken.body.includes(fullAddress)
+  );
+  await new Promise<void>((resolve) => detailServer.close(() => resolve()));
 
   const directory = dirname(fileURLToPath(import.meta.url));
   const writePattern = /(?:\b(?:create|update|upsert|delete)\s*\(|executeRaw|rawPayload)/;

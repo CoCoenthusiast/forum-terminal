@@ -123,6 +123,7 @@ article.chart h3 { font-size: 15px; margin: 0 0 2px; color: #cfd8e3; }
 article.chart p { margin: 0 0 8px; }
 svg.chart { display: block; width: 100%; max-width: 900px; height: auto; border: 1px solid #262b33; border-radius: 6px; }
 .table-scroll { overflow-x: auto; }
+.token-address { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; overflow-wrap: anywhere; }
 footer { padding: 16px 24px 28px; border-top: 1px solid #262b33; color: #9aa4b2; font-size: 13px; }
 </style>
 </head>
@@ -431,10 +432,13 @@ export function renderTokens(summaries: readonly TokenSummary[]): string {
 <thead><tr><th>Symbol</th><th>Name</th><th>Address</th><th>Price</th><th>Price 24h</th><th>Liquidity</th><th>Liquidity 24h</th><th>Volume 24h</th><th>Volume 24h change</th><th>Pools</th><th>Holders</th><th>Last capture (UTC)</th></tr></thead>
 <tbody>${summaries
           .map(
-            (token) => `<tr><th scope="row">${tokenText(
-              token.symbol
-            )}</th><td>${tokenText(token.name)}</td><td>${tokenAddress(
-              token.address
+            (token) => `<tr><th scope="row"><a href="/tokens/${escapeHtml(
+              encodeURIComponent(token.address)
+            )}">${tokenText(token.symbol)}</a></th><td>${tokenText(
+              token.name
+            )}</td><td class="token-address">${sanitizeHtml(
+              token.address,
+              200
             )}</td><td>${escapeHtml(
               tokenPrice(token.latest?.priceUsd ?? null)
             )}</td><td>${escapeHtml(
@@ -523,7 +527,7 @@ function holderRows(detail: TokenDetail): string {
 export function renderTokenDetail(detail: TokenDetail): string {
   const body = `<section>
 <h2>${tokenText(detail.symbol)} ${tokenText(detail.name)}</h2>
-<p class="muted">${sanitizeHtml(detail.address, 200)}</p>
+<p class="muted token-address">${sanitizeHtml(detail.address, 200)}</p>
 <p class="muted">Last capture: ${escapeHtml(
     tokenDateTime(detail.latest?.capturedAt ?? null)
   )}</p>
