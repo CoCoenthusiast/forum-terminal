@@ -32,8 +32,12 @@ import {
   renderLaunchpads,
   renderLeverageMacro,
   renderOverview,
+  renderPage,
+  renderTokenDetail,
+  renderTokens,
   type LaunchpadIndicatorGroup,
 } from './pages';
+import { readTokenDetail, readTokenSummaries } from './token-reader';
 
 export const HOST = '127.0.0.1';
 export const DEFAULT_PORT = 3000;
@@ -43,6 +47,10 @@ const MACRO_FORMULA_VERSION = MACRO_INDICATOR_FORMULA_VERSION;
 const COINALYZE_SCOPE = 'coinalyze:SOL';
 
 type DashboardClient = PrismaClient;
+
+export interface DashboardDeps {
+  getClient?: () => Promise<DashboardClient>;
+}
 
 let clientPromise: Promise<DashboardClient> | null = null;
 
@@ -297,7 +305,11 @@ function sendText(res: ServerResponse, status: number, text: string): void {
   res.end(text);
 }
 
-async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  resolveClient: () => Promise<DashboardClient>
+): Promise<void> {
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET');
     sendText(res, 405, 'Method Not Allowed');
@@ -313,7 +325,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendText(res, 400, resolved.error);
       return;
     }
-    const client = await getClient();
+    const client = await resolveClient();
     const input = await readRecapInput(client, resolved.date);
     sendHtml(res, 200, renderOverview(input));
     return;
@@ -325,7 +337,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendText(res, 400, resolved.error);
       return;
     }
-    const client = await getClient();
+    const client = await resolveClient();
     const input = await readHealthInput(client, resolved.date, now);
     const results = evaluateFreshness(input);
     sendHtml(res, 200, renderDataHealth(results, worstStatus(results), resolved.date));
@@ -338,7 +350,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendText(res, 400, resolved.error);
       return;
     }
-    const client = await getClient();
+    const client = await resolveClient();
     const { leverage, macro } = leverageMacroTargets();
     const series = await readIndicatorSeries(
       client,
@@ -362,7 +374,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendText(res, 400, resolved.error);
       return;
     }
-    const client = await getClient();
+    const client = await resolveClient();
     const groups = launchpadTargetGroups();
     const series = await readIndicatorSeries(
       client,
@@ -385,12 +397,43 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     return;
   }
 
+  if (url.pathname === '/tokens') {
+    const client = await resolveClient();
+    const summaries = await readTokenSummaries(client, now);
+    sendHtml(res, 200, renderTokens(summaries));
+    return;
+  }
+
+  if (url.pathname.startsWith('/tokens/')) {
+    const rawAddress = url.pathname.slice('/tokens/'.length);
+    if (rawAddress.length === 0) {
+      sendHtml(res, 404, renderPage('Not found', '<p>Token not found.</p>'));
+      return;
+    }
+    let address: string;
+    try {
+      address = decodeURIComponent(rawAddress);
+    } catch {
+      sendHtml(res, 404, renderPage('Not found', '<p>Token not found.</p>'));
+      return;
+    }
+    const client = await resolveClient();
+    const detail = await readTokenDetail(client, address, now);
+    if (detail === null) {
+      sendHtml(res, 404, renderPage('Not found', '<p>Token not found.</p>'));
+      return;
+    }
+    sendHtml(res, 200, renderTokenDetail(detail));
+    return;
+  }
+
   sendText(res, 404, 'Not Found');
 }
 
-export function createDashboardServer() {
+export function createDashboardServer(deps: DashboardDeps = {}) {
+  const resolveClient = deps.getClient ?? getClient;
   return createHttpServer((req, res) => {
-    handleRequest(req, res).catch((error: unknown) => {
+    handleRequest(req, res, resolveClient).catch((error: unknown) => {
       console.error(
         '[DASHBOARD]',
         error instanceof Error ? error.message : String(error).slice(0, 300)

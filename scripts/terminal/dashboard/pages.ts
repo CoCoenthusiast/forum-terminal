@@ -1,8 +1,16 @@
 import { LAUNCHPAD_LABELS, REGIME_LABELS, type RecapInput, type RecapMetric } from '../recap/recap-format';
 import { delayDays, type FreshnessResult, type FreshnessStatus } from '../checks/freshness-rules';
 import { LAUNCHPAD_SLUGS } from '../config';
-import { latestPoint, latestValueText, renderLineChart, renderMultiLineChart } from './charts';
+import {
+  latestPoint,
+  latestValueText,
+  renderLineChart,
+  renderMultiLineChart,
+  renderTimeLineChart,
+} from './charts';
 import type { IndicatorSeries } from './series-reader';
+import { escapeHtml, sanitizeHtml, sanitizeText } from './sanitize';
+import type { TokenChartPoint, TokenDetail, TokenSummary } from './token-reader';
 
 export const DASHBOARD_FOOTER =
   'Local read-only dashboard. Data: CoinGecko, DefiLlama, Coinalyze, U.S. Treasury, Federal Reserve. Not financial advice.';
@@ -15,15 +23,6 @@ const USD_FORMATTER = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 function metricDate(metric: RecapMetric | null | undefined): string | null {
   const value = metric?.dataAsOf ?? metric?.asOf;
@@ -130,7 +129,7 @@ footer { padding: 16px 24px 28px; border-top: 1px solid #262b33; color: #9aa4b2;
 <body>
 <header>
 <h1>SOL Terminal Dashboard</h1>
-<nav><a href="/">Overview</a><a href="/health">Data health</a><a href="/leverage-macro">Leverage &amp; macro</a><a href="/launchpads">Launchpads</a></nav>
+<nav><a href="/">Overview</a><a href="/health">Data health</a><a href="/leverage-macro">Leverage &amp; macro</a><a href="/launchpads">Launchpads</a><a href="/tokens">Tokens</a></nav>
 </header>
 <main>
 ${body}
@@ -341,4 +340,221 @@ ${charts}
 </section>`;
 
   return renderPage('Launchpads', body);
+}
+
+const TOKEN_NOTICES = [
+  'Values are among the 10 tokens observed, not a market rate.',
+  'Raw numbers only: no good/bad label, and sophisticated bot activity is not detected.',
+  'Token data comes from GeckoTerminal and is captured 4 times a day.',
+] as const;
+
+const TOKEN_PRICE_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 8,
+});
+
+const TOKEN_USD_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+const TOKEN_NUMBER_FORMATTER = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 4,
+});
+
+function tokenNotices(): string {
+  return TOKEN_NOTICES.map((notice) => `<p class="notice">${escapeHtml(notice)}</p>`).join(
+    '\n'
+  );
+}
+
+function tokenText(value: string | null | undefined, maxLength = 40): string {
+  const clean = sanitizeHtml(value, maxLength);
+  return clean.length > 0 ? clean : 'n/a';
+}
+
+function tokenAddress(value: string): string {
+  const clean = sanitizeText(value, 200);
+  const short =
+    clean.length <= 8 ? clean : `${clean.slice(0, 4)}…${clean.slice(-4)}`;
+  return escapeHtml(short);
+}
+
+function tokenPrice(value: number | null): string {
+  return value === null ? 'n/a' : TOKEN_PRICE_FORMATTER.format(value);
+}
+
+function tokenUsd(value: number | null): string {
+  return value === null ? 'n/a' : TOKEN_USD_FORMATTER.format(value);
+}
+
+function tokenNumber(value: number | null): string {
+  return value === null ? 'n/a' : TOKEN_NUMBER_FORMATTER.format(value);
+}
+
+function tokenChange(value: number | null): string {
+  if (value === null) return 'n/a';
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
+}
+
+function tokenDateTime(value: Date | null): string {
+  if (value === null) return 'n/a';
+  return `${value.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+const TOKEN_GAP_MS = 9 * 60 * 60 * 1000;
+
+function tokenChart(
+  detail: Pick<TokenDetail, 'from' | 'to'>,
+  indicator: string,
+  unit: string,
+  points: readonly TokenChartPoint[]
+): string {
+  return renderTimeLineChart(points, {
+    from: new Date(`${detail.from}T00:00:00.000Z`),
+    to: new Date(`${detail.to}T23:59:59.999Z`),
+    unit,
+    indicator,
+    gapMs: TOKEN_GAP_MS,
+  });
+}
+
+export function renderTokens(summaries: readonly TokenSummary[]): string {
+  const table =
+    summaries.length === 0
+      ? '<p>n/a</p>'
+      : `<div class="table-scroll"><table>
+<thead><tr><th>Symbol</th><th>Name</th><th>Address</th><th>Price</th><th>Price 24h</th><th>Liquidity</th><th>Liquidity 24h</th><th>Volume 24h</th><th>Volume 24h change</th><th>Pools</th><th>Holders</th><th>Last capture (UTC)</th></tr></thead>
+<tbody>${summaries
+          .map(
+            (token) => `<tr><th scope="row">${tokenText(
+              token.symbol
+            )}</th><td>${tokenText(token.name)}</td><td>${tokenAddress(
+              token.address
+            )}</td><td>${escapeHtml(
+              tokenPrice(token.latest?.priceUsd ?? null)
+            )}</td><td>${escapeHtml(
+              tokenChange(token.priceChangePct)
+            )}</td><td>${escapeHtml(
+              tokenUsd(token.latest?.liquidityUsd ?? null)
+            )}</td><td>${escapeHtml(
+              tokenChange(token.liquidityChangePct)
+            )}</td><td>${escapeHtml(
+              tokenUsd(token.latest?.volume24hUsd ?? null)
+            )}</td><td>${escapeHtml(
+              tokenChange(token.volumeChangePct)
+            )}</td><td>${escapeHtml(
+              tokenNumber(token.poolsObserved)
+            )}</td><td>${escapeHtml(
+              tokenNumber(token.holdersCount)
+            )}</td><td>${escapeHtml(
+              tokenDateTime(token.latest?.capturedAt ?? null)
+            )}</td></tr>`
+          )
+          .join('')}</tbody>
+</table></div>`;
+
+  const charts =
+    summaries.length === 0
+      ? '<p>n/a</p>'
+      : summaries
+          .map(
+            (token) => `<article class="chart">
+<h3>${tokenText(token.symbol)} price</h3>
+<p class="muted">${tokenAddress(token.address)} · last 14 days</p>
+${tokenChart(token, 'price_usd', 'USD', token.pricePoints)}
+</article>`
+          )
+          .join('\n');
+
+  const body = `<section>
+<h2>Tokens</h2>
+${tokenNotices()}
+</section>
+<section>
+<h2>Summary</h2>
+${table}
+</section>
+<section>
+<h2>Price charts (last 14 days)</h2>
+${charts}
+</section>`;
+
+  return renderPage('Tokens', body);
+}
+
+function poolRows(detail: TokenDetail): string {
+  if (detail.pools.length === 0) {
+    return '<tr><td colspan="8">n/a</td></tr>';
+  }
+  return detail.pools
+    .map(
+      (pool) => `<tr><td>${tokenText(pool.dexId)}</td><td>${escapeHtml(
+        tokenUsd(pool.reserveInUsd)
+      )}</td><td>${escapeHtml(tokenUsd(pool.volume24hUsd))}</td><td>${escapeHtml(
+        tokenNumber(pool.buys24h)
+      )}</td><td>${escapeHtml(tokenNumber(pool.sells24h))}</td><td>${escapeHtml(
+        tokenNumber(pool.buyers24h)
+      )}</td><td>${escapeHtml(tokenNumber(pool.sellers24h))}</td><td>${escapeHtml(
+        tokenDateTime(pool.poolCreatedAt)
+      )}</td></tr>`
+    )
+    .join('');
+}
+
+function holderRows(detail: TokenDetail): string {
+  const holder = detail.holder;
+  if (holder === null) {
+    return '<tr><td colspan="6">n/a</td></tr>';
+  }
+  return `<tr><td>${escapeHtml(tokenNumber(holder.holdersCount))}</td><td>${escapeHtml(
+    tokenNumber(holder.top10Pct)
+  )}</td><td>${escapeHtml(tokenNumber(holder.rank11to20Pct))}</td><td>${escapeHtml(
+    tokenNumber(holder.rank21to40Pct)
+  )}</td><td>${escapeHtml(tokenNumber(holder.restPct))}</td><td>${escapeHtml(
+    tokenDateTime(holder.sourceLastUpdated)
+  )}</td></tr>`;
+}
+
+export function renderTokenDetail(detail: TokenDetail): string {
+  const body = `<section>
+<h2>${tokenText(detail.symbol)} ${tokenText(detail.name)}</h2>
+<p class="muted">${sanitizeHtml(detail.address, 200)}</p>
+<p class="muted">Last capture: ${escapeHtml(
+    tokenDateTime(detail.latest?.capturedAt ?? null)
+  )}</p>
+${tokenNotices()}
+</section>
+<section>
+<h2>Price (last 14 days)</h2>
+${tokenChart(detail, 'price_usd', 'USD', detail.pricePoints)}
+</section>
+<section>
+<h2>Liquidity (last 14 days)</h2>
+${tokenChart(detail, 'liquidity_usd', 'USD', detail.liquidityPoints)}
+</section>
+<section>
+<h2>Volume 24h (last 14 days)</h2>
+${tokenChart(detail, 'volume_24h_usd', 'USD', detail.volumePoints)}
+</section>
+<section>
+<h2>Pools (latest capture)</h2>
+<div class="table-scroll"><table>
+<thead><tr><th>DEX</th><th>Reserve in USD</th><th>Volume 24h</th><th>Buys</th><th>Sells</th><th>Buyers</th><th>Sellers</th><th>Pool created</th></tr></thead>
+<tbody>${poolRows(detail)}</tbody>
+</table></div>
+</section>
+<section>
+<h2>Holders (latest capture)</h2>
+<div class="table-scroll"><table>
+<thead><tr><th>Count</th><th>Top 10</th><th>11-20</th><th>21-40</th><th>Rest</th><th>Source last updated</th></tr></thead>
+<tbody>${holderRows(detail)}</tbody>
+</table></div>
+</section>`;
+
+  return renderPage('Token', body);
 }

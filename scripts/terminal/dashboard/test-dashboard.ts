@@ -10,10 +10,22 @@ import {
   renderLaunchpads,
   renderLeverageMacro,
   renderOverview,
+  renderTokenDetail,
+  renderTokens,
   type LaunchpadIndicatorGroup,
 } from './pages';
-import { latestValueText, renderLineChart, renderMultiLineChart } from './charts';
+import {
+  latestValueText,
+  renderLineChart,
+  renderMultiLineChart,
+  renderTimeLineChart,
+} from './charts';
 import type { IndicatorSeries } from './series-reader';
+import {
+  selectPreviousCapture,
+  type TokenDetail,
+  type TokenSummary,
+} from './token-reader';
 import { LAUNCHPAD_LABELS } from '../recap/recap-format';
 import { LAUNCHPAD_SLUGS } from '../config';
 import type { RecapInput, RecapMetric } from '../recap/recap-format';
@@ -66,6 +78,42 @@ function emptySeries(indicator: string, scope: string, unit: string): IndicatorS
     from: '2026-01-01',
     to: '2026-03-31',
     points: [],
+  };
+}
+
+function tokenSummary(overrides: Partial<TokenSummary> = {}): TokenSummary {
+  return {
+    address: 'So11111111111111111111111111111111111111112',
+    name: 'Test Token',
+    symbol: 'TEST',
+    latest: null,
+    previous: null,
+    poolsObserved: null,
+    holdersCount: null,
+    priceChangePct: null,
+    liquidityChangePct: null,
+    volumeChangePct: null,
+    pricePoints: [],
+    from: '2026-10-20',
+    to: '2026-11-02',
+    ...overrides,
+  };
+}
+
+function tokenDetail(overrides: Partial<TokenDetail> = {}): TokenDetail {
+  return {
+    address: 'So11111111111111111111111111111111111111112',
+    name: 'Test Token',
+    symbol: 'TEST',
+    latest: null,
+    pricePoints: [],
+    liquidityPoints: [],
+    volumePoints: [],
+    pools: [],
+    holder: null,
+    from: '2026-10-20',
+    to: '2026-11-02',
+    ...overrides,
   };
 }
 
@@ -125,6 +173,7 @@ async function main(): Promise<void> {
   check('overview has the dashboard footer', overview.includes(DASHBOARD_FOOTER));
   check('overview links to leverage & macro', overview.includes('href="/leverage-macro"'));
   check('overview links to launchpads', overview.includes('href="/launchpads"'));
+  check('overview links to tokens', overview.includes('href="/tokens"'));
 
   const emptyPlatforms = LAUNCHPAD_SLUGS.map((slug) => ({
     slug,
@@ -203,6 +252,25 @@ async function main(): Promise<void> {
     (multiGap.match(/class="chart-line"/g) ?? []).length === 2
   );
 
+  const timeGap = renderTimeLineChart(
+    [
+      { at: new Date('2026-01-01T00:00:00.000Z'), value: 1 },
+      { at: new Date('2026-01-01T06:00:00.000Z'), value: 2 },
+      { at: new Date('2026-01-01T18:00:00.000Z'), value: 4 },
+    ],
+    {
+      from: new Date('2026-01-01T00:00:00.000Z'),
+      to: new Date('2026-01-02T00:00:00.000Z'),
+      unit: 'USD',
+      indicator: 'price_usd',
+      gapMs: 9 * 60 * 60 * 1000,
+    }
+  );
+  check(
+    'a missing token capture splits the line into two segments',
+    (timeGap.match(/class="chart-line"/g) ?? []).length === 2
+  );
+
   const leveragePage = renderLeverageMacro(
     [emptySeries('oi_usd_change_1d_pct', 'coinalyze:SOL', 'PERCENT')],
     []
@@ -244,8 +312,97 @@ async function main(): Promise<void> {
   check('data health renders n/a when there are no checks', health.includes('n/a'));
   check('data health has the dashboard footer', health.includes(DASHBOARD_FOOTER));
 
+  const emptyTokensPage = renderTokens([]);
+  check('tokens page shows n/a for an empty table', emptyTokensPage.includes('n/a'));
+  check(
+    'tokens page has the observed-tokens notice',
+    emptyTokensPage.includes(
+      'Values are among the 10 tokens observed, not a market rate.'
+    )
+  );
+  check(
+    'tokens page has the raw numbers notice',
+    emptyTokensPage.includes(
+      'Raw numbers only: no good/bad label, and sophisticated bot activity is not detected.'
+    )
+  );
+  check(
+    'tokens page has the GeckoTerminal notice',
+    emptyTokensPage.includes(
+      'Token data comes from GeckoTerminal and is captured 4 times a day.'
+    )
+  );
+  check('tokens page has the dashboard footer', emptyTokensPage.includes(DASHBOARD_FOOTER));
+
+  const dirtyName = '\u202e<script>alert(1)</script>';
+  const dirtyTokensPage = renderTokens([tokenSummary({ name: dirtyName })]);
+  check('token names strip bidi controls', !dirtyTokensPage.includes('\u202e'));
+  check(
+    'token names are HTML escaped',
+    !dirtyTokensPage.includes('<script>') &&
+      dirtyTokensPage.includes('&lt;script&gt;')
+  );
+
+  const latestAt = new Date('2026-11-02T12:00:00.000Z');
+  const oneHourBefore = new Date(latestAt.getTime() - 60 * 60 * 1000);
+  const twentyOneHoursBefore = new Date(latestAt.getTime() - 21 * 60 * 60 * 1000);
+  check(
+    'a previous capture under 20h is ignored',
+    selectPreviousCapture(
+      [{ capturedAt: oneHourBefore }, { capturedAt: latestAt }],
+      latestAt
+    ) === null
+  );
+  check(
+    'a previous capture near 24h is used',
+    selectPreviousCapture(
+      [{ capturedAt: twentyOneHoursBefore }, { capturedAt: latestAt }],
+      latestAt
+    )?.capturedAt.getTime() === twentyOneHoursBefore.getTime()
+  );
+  check(
+    'token variation shows n/a when the previous capture is too close',
+    renderTokens([tokenSummary({ priceChangePct: null })]).includes('n/a')
+  );
+
+  const emptyTokenDetail = renderTokenDetail(tokenDetail());
+  check('token detail shows n/a for empty data', emptyTokenDetail.includes('n/a'));
+  check(
+    'token detail has the raw numbers notice',
+    emptyTokenDetail.includes(
+      'Raw numbers only: no good/bad label, and sophisticated bot activity is not detected.'
+    )
+  );
+  check(
+    'token detail has the GeckoTerminal notice',
+    emptyTokenDetail.includes(
+      'Token data comes from GeckoTerminal and is captured 4 times a day.'
+    )
+  );
+  check(
+    'token detail has the dashboard footer',
+    emptyTokenDetail.includes(DASHBOARD_FOOTER)
+  );
+
+  const notFoundServer = createDashboardServer({
+    getClient: async () =>
+      ({ token: { findFirst: async () => null } }) as never,
+  });
+  await new Promise<void>((resolve, reject) => {
+    notFoundServer.once('error', reject);
+    notFoundServer.listen(0, HOST, () => resolve());
+  });
+  const notFoundAddress = notFoundServer.address();
+  const notFoundPort =
+    notFoundAddress !== null && typeof notFoundAddress === 'object'
+      ? notFoundAddress.port
+      : 0;
+  const missingToken = await requestStatus(notFoundPort, 'GET', '/tokens/unknown');
+  check('an unknown token address returns 404', missingToken.status === 404);
+  await new Promise<void>((resolve) => notFoundServer.close(() => resolve()));
+
   const directory = dirname(fileURLToPath(import.meta.url));
-  const writePattern = /(?:\b(?:create|update|upsert|delete)\s*\(|executeRaw)/;
+  const writePattern = /(?:\b(?:create|update|upsert|delete)\s*\(|executeRaw|rawPayload)/;
   const sources = readdirSync(directory).filter(
     (file) => file.endsWith('.ts') && file !== 'test-dashboard.ts'
   );
