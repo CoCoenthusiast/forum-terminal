@@ -22,8 +22,18 @@ import {
   MACRO_INDICATORS,
 } from '../indicators/macro-catalog';
 import { MACRO_SCOPE } from '../indicators/compute-macro-indicators';
+import {
+  LAUNCHPAD_FORMULA_VERSION,
+  LAUNCHPAD_INDICATORS,
+} from '../indicators/launchpads';
 import { readIndicatorSeries, type SeriesTarget } from './series-reader';
-import { renderDataHealth, renderLeverageMacro, renderOverview } from './pages';
+import {
+  renderDataHealth,
+  renderLaunchpads,
+  renderLeverageMacro,
+  renderOverview,
+  type LaunchpadIndicatorGroup,
+} from './pages';
 
 export const HOST = '127.0.0.1';
 export const DEFAULT_PORT = 3000;
@@ -221,6 +231,50 @@ function leverageMacroTargets(): { leverage: SeriesTarget[]; macro: SeriesTarget
   return { leverage, macro };
 }
 
+const LAUNCHPAD_INDICATORS_PER_PLATFORM = 7;
+
+interface LaunchpadTargetGroup {
+  indicator: string;
+  unit: string;
+  targets: SeriesTarget[];
+  slugs: string[];
+}
+
+function launchpadTargetGroups(): LaunchpadTargetGroup[] {
+  const groups = new Map<string, LaunchpadTargetGroup>();
+
+  for (const slug of LAUNCHPAD_SLUGS) {
+    const scope = buildProtocolScope(slug);
+    const definitions = LAUNCHPAD_INDICATORS.filter(
+      (definition) => definition.scope === scope
+    );
+    if (definitions.length !== LAUNCHPAD_INDICATORS_PER_PLATFORM) {
+      throw new Error(
+        `launchpad catalog has ${definitions.length} indicators for ${slug}; expected ${LAUNCHPAD_INDICATORS_PER_PLATFORM}`
+      );
+    }
+
+    for (const definition of definitions) {
+      const group = groups.get(definition.indicator) ?? {
+        indicator: definition.indicator,
+        unit: definition.unit,
+        targets: [],
+        slugs: [],
+      };
+      group.targets.push({
+        indicator: definition.indicator,
+        scope,
+        formulaVersion: LAUNCHPAD_FORMULA_VERSION,
+        unit: definition.unit,
+      });
+      group.slugs.push(slug);
+      groups.set(definition.indicator, group);
+    }
+  }
+
+  return [...groups.values()];
+}
+
 function resolveDate(url: URL, now: Date): { date: string; error: string | null } {
   const value = url.searchParams.get('date');
   if (value === null) return { date: previousUtcDay(now), error: null };
@@ -299,6 +353,35 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         series.slice(leverage.length)
       )
     );
+    return;
+  }
+
+  if (url.pathname === '/launchpads') {
+    const resolved = resolveDate(url, now);
+    if (resolved.error !== null) {
+      sendText(res, 400, resolved.error);
+      return;
+    }
+    const client = await getClient();
+    const groups = launchpadTargetGroups();
+    const series = await readIndicatorSeries(
+      client,
+      groups.flatMap((group) => group.targets),
+      resolved.date
+    );
+    let cursor = 0;
+    const view: LaunchpadIndicatorGroup[] = groups.map((group) => {
+      const platforms = group.slugs.map((slug) => {
+        const item = series[cursor];
+        cursor += 1;
+        if (item === undefined) {
+          throw new Error(`missing series for ${slug}/${group.indicator}`);
+        }
+        return { slug, series: item };
+      });
+      return { indicator: group.indicator, unit: group.unit, platforms };
+    });
+    sendHtml(res, 200, renderLaunchpads(view));
     return;
   }
 

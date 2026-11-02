@@ -4,9 +4,18 @@ import { request } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDashboardServer, HOST } from './server';
-import { DASHBOARD_FOOTER, renderDataHealth, renderLeverageMacro, renderOverview } from './pages';
-import { latestValueText, renderLineChart } from './charts';
+import {
+  DASHBOARD_FOOTER,
+  renderDataHealth,
+  renderLaunchpads,
+  renderLeverageMacro,
+  renderOverview,
+  type LaunchpadIndicatorGroup,
+} from './pages';
+import { latestValueText, renderLineChart, renderMultiLineChart } from './charts';
 import type { IndicatorSeries } from './series-reader';
+import { LAUNCHPAD_LABELS } from '../recap/recap-format';
+import { LAUNCHPAD_SLUGS } from '../config';
 import type { RecapInput, RecapMetric } from '../recap/recap-format';
 
 let passed = 0;
@@ -115,6 +124,84 @@ async function main(): Promise<void> {
   check('overview shows SOL, BTC and ETH', ['SOL', 'BTC', 'ETH'].every((asset) => overview.includes(`>${asset}<`)));
   check('overview has the dashboard footer', overview.includes(DASHBOARD_FOOTER));
   check('overview links to leverage & macro', overview.includes('href="/leverage-macro"'));
+  check('overview links to launchpads', overview.includes('href="/launchpads"'));
+
+  const emptyPlatforms = LAUNCHPAD_SLUGS.map((slug) => ({
+    slug,
+    series: emptySeries(
+      'launchpad_dex_volume_vs_mean_7d',
+      `solana:protocol:${slug}`,
+      'FRACTION'
+    ),
+  }));
+  const launchpadsPage = renderLaunchpads([
+    {
+      indicator: 'launchpad_dex_volume_vs_mean_7d',
+      unit: 'FRACTION',
+      platforms: emptyPlatforms,
+    },
+  ]);
+  check('launchpads page shows n/a for empty data', launchpadsPage.includes('n/a'));
+  check(
+    'launchpads page has the organic adoption notice',
+    launchpadsPage.includes(
+      'High volume is not the same as organic adoption (bots, arbitrage and circular volume are not detected).'
+    )
+  );
+  check(
+    'launchpads page has the delay notice',
+    launchpadsPage.includes(
+      'Launchpad data arrives with a 2-day delay. Values are relative to the 4 platforms covered.'
+    )
+  );
+  check('launchpads page has the dashboard footer', launchpadsPage.includes(DASHBOARD_FOOTER));
+
+  const sharePage = renderLaunchpads([
+    {
+      indicator: 'launchpad_dex_volume_share_7d',
+      unit: 'FRACTION',
+      platforms: emptyPlatforms.map((item) => ({
+        slug: item.slug,
+        series: emptySeries(
+          'launchpad_dex_volume_share_7d',
+          item.series.scope,
+          'FRACTION'
+        ),
+      })),
+    },
+  ]);
+  check(
+    'share is labeled as among the 4 platforms covered',
+    sharePage.includes('share among the 4 platforms covered')
+  );
+  const expectedPlatformList = LAUNCHPAD_SLUGS.map(
+    (slug) => LAUNCHPAD_LABELS[slug] ?? slug
+  ).join(', ');
+  check(
+    'share lists all 4 platforms',
+    sharePage.includes(
+      `share among the 4 platforms covered: ${expectedPlatformList}`
+    )
+  );
+
+  const multiGap = renderMultiLineChart(
+    [
+      {
+        label: 'test',
+        points: [
+          { date: '2026-01-01', value: 1 },
+          { date: '2026-01-02', value: 2 },
+          { date: '2026-01-04', value: 4 },
+          { date: '2026-01-05', value: 5 },
+        ],
+      },
+    ],
+    { from: '2026-01-01', to: '2026-01-05', unit: 'FRACTION' }
+  );
+  check(
+    'a gap in a multi-line chart keeps two segments',
+    (multiGap.match(/class="chart-line"/g) ?? []).length === 2
+  );
 
   const leveragePage = renderLeverageMacro(
     [emptySeries('oi_usd_change_1d_pct', 'coinalyze:SOL', 'PERCENT')],

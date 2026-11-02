@@ -128,3 +128,137 @@ ${lines}
 ${circles}
 </svg>`;
 }
+
+export interface MultiLineSeries {
+  label: string;
+  points: readonly SeriesPoint[];
+}
+
+export interface MultiLineOptions {
+  from: string;
+  to: string;
+  unit: string;
+}
+
+export const MULTI_LINE_COLORS = ['#8ab4f8', '#c3a6ff', '#6dd3c1', '#e0b0ff'] as const;
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+export function renderMultiLineChart(
+  seriesList: readonly MultiLineSeries[],
+  options: MultiLineOptions
+): string {
+  const allPoints = seriesList.flatMap((item) => item.points);
+  if (allPoints.length === 0) return emptyChart();
+
+  const width = SVG_WIDTH;
+  const height = 280;
+  const padLeft = PAD_LEFT;
+  const padRight = PAD_RIGHT;
+  const padTop = 44;
+  const padBottom = 36;
+  const plotWidth = width - padLeft - padRight;
+  const plotHeight = height - padTop - padBottom;
+
+  const fromMs = dayMs(options.from);
+  const toMs = dayMs(options.to);
+  const spanMs = toMs - fromMs;
+
+  const values = allPoints.map((point) => point.value);
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {
+    const pad = Math.abs(max) > 0 ? Math.abs(max) * 0.1 : 1;
+    min -= pad;
+    max += pad;
+  }
+  const valueSpan = max - min;
+
+  const xFor = (date: string): number => {
+    if (spanMs <= 0) return padLeft;
+    const ratio = (dayMs(date) - fromMs) / spanMs;
+    return padLeft + Math.max(0, Math.min(1, ratio)) * plotWidth;
+  };
+  const yFor = (value: number): number =>
+    padTop + ((max - value) / valueSpan) * plotHeight;
+
+  const legend = seriesList
+    .map((item, index) => {
+      const color = MULTI_LINE_COLORS[index % MULTI_LINE_COLORS.length];
+      const x = padLeft + index * 140;
+      return `<rect x="${x}" y="10" width="10" height="10" fill="${color}"/><text x="${
+        x + 14
+      }" y="19" fill="#cfd8e3" font-size="11">${escapeXml(item.label)}</text>`;
+    })
+    .join('');
+
+  const lines = seriesList
+    .map((item, index) => {
+      const color = MULTI_LINE_COLORS[index % MULTI_LINE_COLORS.length];
+      const ordered = [...item.points].sort(
+        (left, right) => dayMs(left.date) - dayMs(right.date)
+      );
+      const segments: SeriesPoint[][] = [];
+      let current: SeriesPoint[] = [];
+      for (const point of ordered) {
+        const previous = current[current.length - 1];
+        if (
+          previous === undefined ||
+          dayMs(point.date) - dayMs(previous.date) === DAY_MS
+        ) {
+          current.push(point);
+        } else {
+          segments.push(current);
+          current = [point];
+        }
+      }
+      if (current.length > 0) segments.push(current);
+
+      return segments
+        .map((segment) => {
+          const d = segment
+            .map((point, pointIndex) => {
+              const command = pointIndex === 0 ? 'M' : 'L';
+              return `${command}${xFor(point.date).toFixed(2)},${yFor(
+                point.value
+              ).toFixed(2)}`;
+            })
+            .join(' ');
+          return `<path class="chart-line" d="${d}" fill="none" stroke="${color}" stroke-width="2"/>`;
+        })
+        .join('');
+    })
+    .join('');
+
+  const unitLabel = options.unit === 'n/a' ? '' : options.unit;
+
+  return `<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="launchpad chart" xmlns="http://www.w3.org/2000/svg">
+<rect x="0" y="0" width="${width}" height="${height}" fill="#12151b"/>
+${legend}
+<line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${
+    padTop + plotHeight
+  }" stroke="#2b313a"/>
+<line x1="${padLeft}" y1="${padTop + plotHeight}" x2="${
+    padLeft + plotWidth
+  }" y2="${padTop + plotHeight}" stroke="#2b313a"/>
+<text x="${padLeft - 6}" y="${padTop + 4}" fill="#9aa4b2" font-size="11" text-anchor="end">${formatNumber(
+    max
+  )}</text>
+<text x="${padLeft - 6}" y="${padTop + plotHeight + 4}" fill="#9aa4b2" font-size="11" text-anchor="end">${formatNumber(
+    min
+  )}</text>
+<text x="${padLeft}" y="${padTop - 10}" fill="#9aa4b2" font-size="11">${unitLabel}</text>
+<text x="${padLeft}" y="${height - 12}" fill="#9aa4b2" font-size="11">${options.from}</text>
+<text x="${padLeft + plotWidth}" y="${
+    height - 12
+  }" fill="#9aa4b2" font-size="11" text-anchor="end">${options.to}</text>
+${lines}
+</svg>`;
+}

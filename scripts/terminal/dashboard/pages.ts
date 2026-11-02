@@ -1,6 +1,7 @@
-import { REGIME_LABELS, type RecapInput, type RecapMetric } from '../recap/recap-format';
+import { LAUNCHPAD_LABELS, REGIME_LABELS, type RecapInput, type RecapMetric } from '../recap/recap-format';
 import { delayDays, type FreshnessResult, type FreshnessStatus } from '../checks/freshness-rules';
-import { latestValueText, renderLineChart } from './charts';
+import { LAUNCHPAD_SLUGS } from '../config';
+import { latestPoint, latestValueText, renderLineChart, renderMultiLineChart } from './charts';
 import type { IndicatorSeries } from './series-reader';
 
 export const DASHBOARD_FOOTER =
@@ -122,13 +123,14 @@ article.chart { margin-bottom: 24px; }
 article.chart h3 { font-size: 15px; margin: 0 0 2px; color: #cfd8e3; }
 article.chart p { margin: 0 0 8px; }
 svg.chart { display: block; width: 100%; max-width: 900px; height: auto; border: 1px solid #262b33; border-radius: 6px; }
+.table-scroll { overflow-x: auto; }
 footer { padding: 16px 24px 28px; border-top: 1px solid #262b33; color: #9aa4b2; font-size: 13px; }
 </style>
 </head>
 <body>
 <header>
 <h1>SOL Terminal Dashboard</h1>
-<nav><a href="/">Overview</a><a href="/health">Data health</a><a href="/leverage-macro">Leverage &amp; macro</a></nav>
+<nav><a href="/">Overview</a><a href="/health">Data health</a><a href="/leverage-macro">Leverage &amp; macro</a><a href="/launchpads">Launchpads</a></nav>
 </header>
 <main>
 ${body}
@@ -236,4 +238,107 @@ ${macroCharts}
 </section>`;
 
   return renderPage('Leverage & macro', body);
+}
+
+export interface LaunchpadPlatformSeries {
+  slug: string;
+  series: IndicatorSeries;
+}
+
+export interface LaunchpadIndicatorGroup {
+  indicator: string;
+  unit: string;
+  platforms: readonly LaunchpadPlatformSeries[];
+}
+
+const LAUNCHPAD_VALUE_FORMATTER = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 2,
+});
+
+function launchpadLabel(slug: string): string {
+  return LAUNCHPAD_LABELS[slug] ?? slug;
+}
+
+function formatLaunchpadValue(value: number, unit: string): string {
+  if (unit === 'FRACTION') return `${(value * 100).toFixed(2)}%`;
+  if (unit === 'RATIO') return value.toFixed(4);
+  const suffix = unit === 'n/a' ? '' : ` ${unit}`;
+  return `${LAUNCHPAD_VALUE_FORMATTER.format(value)}${suffix}`;
+}
+
+function launchpadCell(series: IndicatorSeries | undefined): string {
+  if (series === undefined) return 'n/a';
+  const point = latestPoint(series);
+  if (point === null) return 'n/a';
+  const delay = delayDays(new Date(`${point.date}T00:00:00.000Z`), series.to);
+  return `${formatLaunchpadValue(point.value, series.unit)} (${point.date}, ${delay}d delay)`;
+}
+
+export function renderLaunchpads(groups: readonly LaunchpadIndicatorGroup[]): string {
+  const platformList = LAUNCHPAD_SLUGS.map((slug) => launchpadLabel(slug)).join(', ');
+  const shareSummaryNote = groups.some((group) => group.indicator.includes('share'))
+    ? `<p class="muted">share among the 4 platforms covered: ${escapeHtml(platformList)}</p>`
+    : '';
+
+  const table =
+    groups.length === 0
+      ? '<p>n/a</p>'
+      : `<div class="table-scroll"><table>
+<thead><tr><th>Platform</th>${groups
+          .map((group) => `<th>${escapeHtml(group.indicator)}</th>`)
+          .join('')}</tr></thead>
+<tbody>${LAUNCHPAD_SLUGS.map((slug) => {
+          const cells = groups
+            .map((group) => {
+              const platform = group.platforms.find((item) => item.slug === slug);
+              return `<td>${escapeHtml(launchpadCell(platform?.series))}</td>`;
+            })
+            .join('');
+          return `<tr><th scope="row">${escapeHtml(launchpadLabel(slug))}</th>${cells}</tr>`;
+        }).join('')}</tbody>
+</table></div>`;
+
+  const charts =
+    groups.length === 0
+      ? '<p>n/a</p>'
+      : groups
+          .map((group) => {
+            const first = group.platforms[0]?.series;
+            const from = first?.from ?? 'n/a';
+            const to = first?.to ?? 'n/a';
+            const shareNote = group.indicator.includes('share')
+              ? ` <span class="muted">share among the 4 platforms covered: ${escapeHtml(
+                  platformList
+                )}</span>`
+              : '';
+            return `<article class="chart">
+<h3>${escapeHtml(group.indicator)}${shareNote}</h3>
+<p class="muted">${escapeHtml(group.unit)}</p>
+${renderMultiLineChart(
+  group.platforms.map((platform) => ({
+    label: launchpadLabel(platform.slug),
+    points: platform.series.points,
+  })),
+  { from, to, unit: group.unit }
+)}
+</article>`;
+          })
+          .join('\n');
+
+  const body = `<section>
+<h2>Launchpads</h2>
+<p class="notice">High volume is not the same as organic adoption (bots, arbitrage and circular volume are not detected).</p>
+<p class="notice">Launchpad data arrives with a 2-day delay. Values are relative to the 4 platforms covered.</p>
+</section>
+<section>
+<h2>Summary</h2>
+${shareSummaryNote}
+${table}
+</section>
+<section>
+<h2>Charts (last 90 days)</h2>
+${charts}
+</section>`;
+
+  return renderPage('Launchpads', body);
 }
