@@ -22,6 +22,8 @@ export interface TokenCapturePoint {
   priceUsd: number | null;
   liquidityUsd: number | null;
   volume24hUsd: number | null;
+  marketCapUsd: number | null;
+  fdvUsd: number | null;
 }
 
 export interface TokenSummary {
@@ -35,6 +37,7 @@ export interface TokenSummary {
   priceChangePct: number | null;
   liquidityChangePct: number | null;
   volumeChangePct: number | null;
+  marketCapChangePct: number | null;
   pricePoints: TokenChartPoint[];
   from: string;
   to: string;
@@ -70,6 +73,8 @@ export interface TokenDetail {
   pricePoints: TokenChartPoint[];
   liquidityPoints: TokenChartPoint[];
   volumePoints: TokenChartPoint[];
+  marketCapPoints: TokenChartPoint[];
+  fdvPoints: TokenChartPoint[];
   pools: TokenPoolRow[];
   holder: TokenHolderRow | null;
   from: string;
@@ -145,18 +150,22 @@ function capturePoint(row: {
   priceUsd: unknown;
   liquidityUsd: unknown;
   volume24hUsd: unknown;
+  marketCapUsd: unknown;
+  fdvUsd: unknown;
 }): TokenCapturePoint {
   return {
     capturedAt: row.capturedAt,
     priceUsd: toNumber(row.priceUsd),
     liquidityUsd: toNumber(row.liquidityUsd),
     volume24hUsd: toNumber(row.volume24hUsd),
+    marketCapUsd: toNumber(row.marketCapUsd),
+    fdvUsd: toNumber(row.fdvUsd),
   };
 }
 
 function chartPoints(
   captures: readonly TokenCapturePoint[],
-  field: 'priceUsd' | 'liquidityUsd' | 'volume24hUsd',
+  field: 'priceUsd' | 'liquidityUsd' | 'volume24hUsd' | 'marketCapUsd' | 'fdvUsd',
   fromMs: number,
   toMs: number
 ): TokenChartPoint[] {
@@ -190,6 +199,8 @@ export async function readTokenSummaries(
           priceUsd: true,
           liquidityUsd: true,
           volume24hUsd: true,
+          marketCapUsd: true,
+          fdvUsd: true,
           poolsObserved: true,
           holder: { select: { holdersCount: true } },
         },
@@ -225,6 +236,10 @@ export async function readTokenSummaries(
         latest === null || previous === null
           ? null
           : changePct(latest.volume24hUsd, previous.volume24hUsd),
+      marketCapChangePct:
+        latest === null || previous === null
+          ? null
+          : changePct(latest.marketCapUsd, previous.marketCapUsd),
       pricePoints: chartPoints(captures, 'priceUsd', bounds.fromMs, bounds.toMs),
       from: bounds.from,
       to: bounds.to,
@@ -255,6 +270,8 @@ export async function readTokenDetail(
       priceUsd: true,
       liquidityUsd: true,
       volume24hUsd: true,
+      marketCapUsd: true,
+      fdvUsd: true,
     },
   });
 
@@ -266,6 +283,8 @@ export async function readTokenDetail(
       priceUsd: true,
       liquidityUsd: true,
       volume24hUsd: true,
+      marketCapUsd: true,
+      fdvUsd: true,
       pools: {
         select: {
           poolAddress: true,
@@ -304,6 +323,8 @@ export async function readTokenDetail(
     pricePoints: chartPoints(points, 'priceUsd', bounds.fromMs, bounds.toMs),
     liquidityPoints: chartPoints(points, 'liquidityUsd', bounds.fromMs, bounds.toMs),
     volumePoints: chartPoints(points, 'volume24hUsd', bounds.fromMs, bounds.toMs),
+    marketCapPoints: chartPoints(points, 'marketCapUsd', bounds.fromMs, bounds.toMs),
+    fdvPoints: chartPoints(points, 'fdvUsd', bounds.fromMs, bounds.toMs),
     pools:
       latestRow?.pools.map((pool) => ({
         poolAddress: pool.poolAddress,

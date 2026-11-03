@@ -22,6 +22,8 @@ import {
 } from './charts';
 import type { IndicatorSeries } from './series-reader';
 import {
+  readTokenDetail,
+  readTokenSummaries,
   selectPreviousCapture,
   type TokenDetail,
   type TokenSummary,
@@ -93,6 +95,7 @@ function tokenSummary(overrides: Partial<TokenSummary> = {}): TokenSummary {
     priceChangePct: null,
     liquidityChangePct: null,
     volumeChangePct: null,
+    marketCapChangePct: null,
     pricePoints: [],
     from: '2026-10-20',
     to: '2026-11-02',
@@ -109,6 +112,8 @@ function tokenDetail(overrides: Partial<TokenDetail> = {}): TokenDetail {
     pricePoints: [],
     liquidityPoints: [],
     volumePoints: [],
+    marketCapPoints: [],
+    fdvPoints: [],
     pools: [],
     holder: null,
     from: '2026-10-20',
@@ -332,6 +337,12 @@ async function main(): Promise<void> {
       'Token data comes from GeckoTerminal and is captured 4 times a day.'
     )
   );
+  check(
+    'tokens page has the market cap/FDV notice',
+    emptyTokensPage.includes(
+      'Market cap uses circulating supply and FDV uses total supply, both as reported by GeckoTerminal. Ratios are raw numbers with no good/bad label.'
+    )
+  );
   check('tokens page has the dashboard footer', emptyTokensPage.includes(DASHBOARD_FOOTER));
 
   const fullAddress = tokenSummary().address;
@@ -344,14 +355,72 @@ async function main(): Promise<void> {
     'tokens table shows the full address',
     tokenRowPage.includes(`<td class="token-address">${fullAddress}</td>`)
   );
+  check(
+    'tokens table uses the requested column order',
+    tokenRowPage.includes(
+      '<th>Symbol</th><th>Address</th><th>Market cap</th><th>FDV</th><th>Price (USD)</th><th>Liquidity</th><th>Liquidity / market cap</th><th>Volume 24h</th><th>Volume 24h / market cap</th><th>Pools</th><th>Holders</th><th>Last capture (UTC)</th>'
+    )
+  );
+
+  const tokenLatest = {
+    capturedAt: new Date('2026-11-02T12:00:00.000Z'),
+    priceUsd: 2,
+    liquidityUsd: 1_000_000,
+    volume24hUsd: 2_000_000,
+    marketCapUsd: null as number | null,
+    fdvUsd: null as number | null,
+  };
+  const nullMarketCapPage = renderTokens([tokenSummary({ latest: tokenLatest })]);
+  check(
+    'market cap null renders n/a',
+    nullMarketCapPage.includes('<td class="token-market-cap">n/a')
+  );
+  check(
+    'ratios are n/a when market cap is null',
+    (nullMarketCapPage.match(/<td class="token-ratio">n\/a<\/td>/g) ?? []).length === 2
+  );
+
+  const zeroMarketCapPage = renderTokens([
+    tokenSummary({
+      latest: { ...tokenLatest, marketCapUsd: 0, fdvUsd: 0 },
+    }),
+  ]);
+  check(
+    'market cap zero does not divide',
+    (zeroMarketCapPage.match(/<td class="token-ratio">n\/a<\/td>/g) ?? []).length === 2 &&
+      !zeroMarketCapPage.includes('Infinity') &&
+      !zeroMarketCapPage.includes('NaN')
+  );
+
+  const ratioPage = renderTokens([
+    tokenSummary({
+      latest: {
+        ...tokenLatest,
+        marketCapUsd: 100_000_000,
+        fdvUsd: 120_000_000,
+      },
+    }),
+  ]);
+  check(
+    'market cap and FDV use zero-decimal dollar formatting',
+    ratioPage.includes('$100,000,000') && ratioPage.includes('$120,000,000')
+  );
+  check(
+    'liquidity / market cap is a percentage',
+    ratioPage.includes('<td class="token-ratio">1.00%</td>')
+  );
+  check(
+    'volume / market cap is a percentage',
+    ratioPage.includes('<td class="token-ratio">2.00%</td>')
+  );
 
   const dirtyName = '\u202e<script>alert(1)</script>';
-  const dirtyTokensPage = renderTokens([tokenSummary({ name: dirtyName })]);
-  check('token names strip bidi controls', !dirtyTokensPage.includes('\u202e'));
+  const dirtyTokenDetail = renderTokenDetail(tokenDetail({ name: dirtyName }));
+  check('token names strip bidi controls', !dirtyTokenDetail.includes('\u202e'));
   check(
     'token names are HTML escaped',
-    !dirtyTokensPage.includes('<script>') &&
-      dirtyTokensPage.includes('&lt;script&gt;')
+    !dirtyTokenDetail.includes('<script>') &&
+      dirtyTokenDetail.includes('&lt;script&gt;')
   );
 
   const specialAddress = 'abc<def&ghi';
@@ -396,6 +465,113 @@ async function main(): Promise<void> {
     renderTokens([tokenSummary({ priceChangePct: null })]).includes('n/a')
   );
 
+  const summaryNow = new Date('2026-11-02T12:00:00.000Z');
+  const summaryCaptures = [
+    {
+      capturedAt: summaryNow,
+      priceUsd: 2,
+      liquidityUsd: 1_000_000,
+      volume24hUsd: 2_000_000,
+      marketCapUsd: 100_000_000,
+      fdvUsd: 120_000_000,
+      poolsObserved: 3,
+      holder: { holdersCount: 1000 },
+    },
+    {
+      capturedAt: new Date(summaryNow.getTime() - 60 * 60 * 1000),
+      priceUsd: 1,
+      liquidityUsd: 900_000,
+      volume24hUsd: 1_800_000,
+      marketCapUsd: 90_000_000,
+      fdvUsd: 110_000_000,
+      poolsObserved: 3,
+      holder: { holdersCount: 900 },
+    },
+  ];
+  const summaryClient = {
+    token: {
+      findMany: async () => [
+        {
+          address: fullAddress,
+          name: 'Test Token',
+          symbol: 'TEST',
+          captures: summaryCaptures,
+        },
+      ],
+    },
+  };
+  const marketCapSummaries = await readTokenSummaries(summaryClient as never, summaryNow);
+  check(
+    'market cap variation is n/a when the previous capture is under 20h',
+    marketCapSummaries[0]?.marketCapChangePct === null
+  );
+  check(
+    'market cap variation n/a is rendered',
+    renderTokens(marketCapSummaries).includes(
+      '$100,000,000 <span class="muted">(24h n/a)</span>'
+    )
+  );
+
+  const gapNow = new Date('2026-11-02T12:00:00.000Z');
+  const gapCaptures = [
+    {
+      capturedAt: new Date(gapNow.getTime() - 12 * 60 * 60 * 1000),
+      priceUsd: 1,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: 100_000,
+      fdvUsd: 120_000,
+    },
+    {
+      capturedAt: new Date(gapNow.getTime() - 6 * 60 * 60 * 1000),
+      priceUsd: 2,
+      liquidityUsd: 1100,
+      volume24hUsd: 2100,
+      marketCapUsd: null,
+      fdvUsd: null,
+    },
+    {
+      capturedAt: gapNow,
+      priceUsd: 3,
+      liquidityUsd: 1200,
+      volume24hUsd: 2200,
+      marketCapUsd: 300_000,
+      fdvUsd: 360_000,
+    },
+  ];
+  const gapClient = {
+    token: {
+      findFirst: async () => ({
+        address: fullAddress,
+        name: 'Test Token',
+        symbol: 'TEST',
+      }),
+    },
+    tokenCapture: {
+      findMany: async () => gapCaptures,
+      findFirst: async () => ({ ...gapCaptures[2], pools: [], holder: null }),
+    },
+  };
+  const gapDetail = await readTokenDetail(gapClient as never, fullAddress, gapNow);
+  check(
+    'a null market cap capture is omitted, not zero',
+    gapDetail !== null &&
+      gapDetail.marketCapPoints.length === 2 &&
+      gapDetail.marketCapPoints.every((point) => point.value !== 0)
+  );
+  const marketCapGapChart = renderTimeLineChart(gapDetail?.marketCapPoints ?? [], {
+    from: new Date(`${gapDetail?.from ?? '2026-10-20'}T00:00:00.000Z`),
+    to: new Date(`${gapDetail?.to ?? '2026-11-02'}T23:59:59.999Z`),
+    unit: 'USD',
+    indicator: 'market_cap_usd',
+    gapMs: 9 * 60 * 60 * 1000,
+  });
+  check(
+    'a null market cap capture becomes a chart gap',
+    (marketCapGapChart.match(/class="chart-line"/g) ?? []).length === 2 &&
+      !marketCapGapChart.includes('data-value="0"')
+  );
+
   const emptyTokenDetail = renderTokenDetail(tokenDetail());
   check('token detail shows n/a for empty data', emptyTokenDetail.includes('n/a'));
   check(
@@ -412,6 +588,12 @@ async function main(): Promise<void> {
     'token detail has the GeckoTerminal notice',
     emptyTokenDetail.includes(
       'Token data comes from GeckoTerminal and is captured 4 times a day.'
+    )
+  );
+  check(
+    'token detail has the market cap/FDV notice',
+    emptyTokenDetail.includes(
+      'Market cap uses circulating supply and FDV uses total supply, both as reported by GeckoTerminal. Ratios are raw numbers with no good/bad label.'
     )
   );
   check(

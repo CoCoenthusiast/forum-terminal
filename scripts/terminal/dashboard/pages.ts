@@ -347,6 +347,7 @@ const TOKEN_NOTICES = [
   'Values are among the 10 tokens observed, not a market rate.',
   'Raw numbers only: no good/bad label, and sophisticated bot activity is not detected.',
   'Token data comes from GeckoTerminal and is captured 4 times a day.',
+  'Market cap uses circulating supply and FDV uses total supply, both as reported by GeckoTerminal. Ratios are raw numbers with no good/bad label.',
 ] as const;
 
 const TOKEN_PRICE_FORMATTER = new Intl.NumberFormat('en-US', {
@@ -361,6 +362,13 @@ const TOKEN_USD_FORMATTER = new Intl.NumberFormat('en-US', {
   currency: 'USD',
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
+});
+
+const TOKEN_MARKET_CAP_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
 });
 
 const TOKEN_NUMBER_FORMATTER = new Intl.NumberFormat('en-US', {
@@ -391,6 +399,24 @@ function tokenPrice(value: number | null): string {
 
 function tokenUsd(value: number | null): string {
   return value === null ? 'n/a' : TOKEN_USD_FORMATTER.format(value);
+}
+
+function tokenMarketCap(value: number | null): string {
+  return value === null ? 'n/a' : TOKEN_MARKET_CAP_FORMATTER.format(value);
+}
+
+function tokenRatio(numerator: number | null, marketCap: number | null): number | null {
+  if (numerator === null || marketCap === null || marketCap === 0) return null;
+  const result = (numerator / marketCap) * 100;
+  return Number.isFinite(result) ? result : null;
+}
+
+function tokenPercent(value: number | null): string {
+  return value === null ? 'n/a' : `${value.toFixed(2)}%`;
+}
+
+function tokenWithChange(value: string, change: number | null): string {
+  return `${escapeHtml(value)} <span class="muted">(24h ${escapeHtml(tokenChange(change))})</span>`;
 }
 
 function tokenNumber(value: number | null): string {
@@ -429,36 +455,44 @@ export function renderTokens(summaries: readonly TokenSummary[]): string {
     summaries.length === 0
       ? '<p>n/a</p>'
       : `<div class="table-scroll"><table>
-<thead><tr><th>Symbol</th><th>Name</th><th>Address</th><th>Price</th><th>Price 24h</th><th>Liquidity</th><th>Liquidity 24h</th><th>Volume 24h</th><th>Volume 24h change</th><th>Pools</th><th>Holders</th><th>Last capture (UTC)</th></tr></thead>
+<thead><tr><th>Symbol</th><th>Address</th><th>Market cap</th><th>FDV</th><th>Price (USD)</th><th>Liquidity</th><th>Liquidity / market cap</th><th>Volume 24h</th><th>Volume 24h / market cap</th><th>Pools</th><th>Holders</th><th>Last capture (UTC)</th></tr></thead>
 <tbody>${summaries
-          .map(
-            (token) => `<tr><th scope="row"><a href="/tokens/${escapeHtml(
+          .map((token) => {
+            const latest = token.latest;
+            const marketCap = latest?.marketCapUsd ?? null;
+            const liquidity = latest?.liquidityUsd ?? null;
+            const volume = latest?.volume24hUsd ?? null;
+            return `<tr><th scope="row"><a href="/tokens/${escapeHtml(
               encodeURIComponent(token.address)
-            )}">${tokenText(token.symbol)}</a></th><td>${tokenText(
-              token.name
-            )}</td><td class="token-address">${sanitizeHtml(
+            )}">${tokenText(token.symbol)}</a></th><td class="token-address">${sanitizeHtml(
               token.address,
               200
-            )}</td><td>${escapeHtml(
-              tokenPrice(token.latest?.priceUsd ?? null)
-            )}</td><td>${escapeHtml(
-              tokenChange(token.priceChangePct)
-            )}</td><td>${escapeHtml(
-              tokenUsd(token.latest?.liquidityUsd ?? null)
-            )}</td><td>${escapeHtml(
-              tokenChange(token.liquidityChangePct)
-            )}</td><td>${escapeHtml(
-              tokenUsd(token.latest?.volume24hUsd ?? null)
-            )}</td><td>${escapeHtml(
-              tokenChange(token.volumeChangePct)
+            )}</td><td class="token-market-cap">${tokenWithChange(
+              tokenMarketCap(marketCap),
+              token.marketCapChangePct
+            )}</td><td class="token-fdv">${escapeHtml(
+              tokenMarketCap(latest?.fdvUsd ?? null)
+            )}</td><td class="token-price">${tokenWithChange(
+              tokenPrice(latest?.priceUsd ?? null),
+              token.priceChangePct
+            )}</td><td class="token-liquidity">${tokenWithChange(
+              tokenUsd(liquidity),
+              token.liquidityChangePct
+            )}</td><td class="token-ratio">${escapeHtml(
+              tokenPercent(tokenRatio(liquidity, marketCap))
+            )}</td><td class="token-volume">${tokenWithChange(
+              tokenUsd(volume),
+              token.volumeChangePct
+            )}</td><td class="token-ratio">${escapeHtml(
+              tokenPercent(tokenRatio(volume, marketCap))
             )}</td><td>${escapeHtml(
               tokenNumber(token.poolsObserved)
             )}</td><td>${escapeHtml(
               tokenNumber(token.holdersCount)
             )}</td><td>${escapeHtml(
-              tokenDateTime(token.latest?.capturedAt ?? null)
-            )}</td></tr>`
-          )
+              tokenDateTime(latest?.capturedAt ?? null)
+            )}</td></tr>`;
+          })
           .join('')}</tbody>
 </table></div>`;
 
@@ -544,6 +578,14 @@ ${tokenChart(detail, 'liquidity_usd', 'USD', detail.liquidityPoints)}
 <section>
 <h2>Volume 24h (last 14 days)</h2>
 ${tokenChart(detail, 'volume_24h_usd', 'USD', detail.volumePoints)}
+</section>
+<section>
+<h2>Market cap (last 14 days)</h2>
+${tokenChart(detail, 'market_cap_usd', 'USD', detail.marketCapPoints)}
+</section>
+<section>
+<h2>FDV (last 14 days)</h2>
+${tokenChart(detail, 'fdv_usd', 'USD', detail.fdvPoints)}
 </section>
 <section>
 <h2>Pools (latest capture)</h2>
