@@ -74,6 +74,8 @@ export interface TokenDetail {
   liquidityPoints: TokenChartPoint[];
   volumePoints: TokenChartPoint[];
   marketCapPoints: TokenChartPoint[];
+  marketCapEstimatedPoints: TokenChartPoint[];
+  impliedSupply: number | null;
   fdvPoints: TokenChartPoint[];
   pools: TokenPoolRow[];
   holder: TokenHolderRow | null;
@@ -175,6 +177,47 @@ function chartPoints(
     if (ms < fromMs || ms > toMs) continue;
     const value = capture[field];
     if (value === null) continue;
+    points.push({ at: capture.capturedAt, value });
+  }
+  return points.sort((left, right) => left.at.getTime() - right.at.getTime());
+}
+
+function impliedSupplyFromCaptures(
+  captures: readonly TokenCapturePoint[]
+): number | null {
+  let latest: TokenCapturePoint | null = null;
+  for (const capture of captures) {
+    if (capture.marketCapUsd === null || capture.marketCapUsd <= 0) continue;
+    if (capture.priceUsd === null || capture.priceUsd <= 0) continue;
+    if (
+      latest === null ||
+      capture.capturedAt.getTime() > latest.capturedAt.getTime()
+    ) {
+      latest = capture;
+    }
+  }
+  if (latest === null) return null;
+  const marketCap = latest.marketCapUsd;
+  const price = latest.priceUsd;
+  if (marketCap === null || price === null) return null;
+  return marketCap / price;
+}
+
+function estimatedMarketCapPoints(
+  captures: readonly TokenCapturePoint[],
+  impliedSupply: number | null,
+  fromMs: number,
+  toMs: number
+): TokenChartPoint[] {
+  if (impliedSupply === null) return [];
+  const points: TokenChartPoint[] = [];
+  for (const capture of captures) {
+    const ms = capture.capturedAt.getTime();
+    if (ms < fromMs || ms > toMs) continue;
+    if (capture.marketCapUsd !== null) continue;
+    if (capture.priceUsd === null || capture.priceUsd <= 0) continue;
+    const value = capture.priceUsd * impliedSupply;
+    if (!Number.isFinite(value)) continue;
     points.push({ at: capture.capturedAt, value });
   }
   return points.sort((left, right) => left.at.getTime() - right.at.getTime());
@@ -314,6 +357,7 @@ export async function readTokenDetail(
 
   const points = captures.map(capturePoint);
   const latest = latestRow === null ? null : capturePoint(latestRow);
+  const impliedSupply = impliedSupplyFromCaptures(points);
 
   return {
     address: token.address,
@@ -324,6 +368,13 @@ export async function readTokenDetail(
     liquidityPoints: chartPoints(points, 'liquidityUsd', bounds.fromMs, bounds.toMs),
     volumePoints: chartPoints(points, 'volume24hUsd', bounds.fromMs, bounds.toMs),
     marketCapPoints: chartPoints(points, 'marketCapUsd', bounds.fromMs, bounds.toMs),
+    marketCapEstimatedPoints: estimatedMarketCapPoints(
+      points,
+      impliedSupply,
+      bounds.fromMs,
+      bounds.toMs
+    ),
+    impliedSupply,
     fdvPoints: chartPoints(points, 'fdvUsd', bounds.fromMs, bounds.toMs),
     pools:
       latestRow?.pools.map((pool) => ({

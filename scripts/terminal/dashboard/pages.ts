@@ -343,6 +343,9 @@ ${charts}
   return renderPage('Launchpads', body);
 }
 
+const TOKEN_ESTIMATED_NOTICE =
+  "Estimated market cap applies today's implied circulating supply to past prices; unlocks, burns and mints are not reflected, so it can be far from the true historical value.";
+
 const TOKEN_NOTICES = [
   'Values are among the 10 tokens observed, not a market rate.',
   'Raw numbers only: no good/bad label, and sophisticated bot activity is not detected.',
@@ -447,6 +450,33 @@ function tokenChart(
     unit,
     indicator,
     gapMs: TOKEN_GAP_MS,
+  });
+}
+
+function tokenMarketCapChart(detail: TokenDetail): string {
+  const series: {
+    label: string;
+    points: TokenChartPoint[];
+    dashed?: boolean;
+  }[] = [];
+  if (detail.marketCapPoints.length > 0) {
+    series.push({ label: 'Reported', points: detail.marketCapPoints });
+  }
+  if (detail.marketCapEstimatedPoints.length > 0) {
+    series.push({
+      label: 'Estimated (price × latest implied supply)',
+      points: detail.marketCapEstimatedPoints,
+      dashed: true,
+    });
+  }
+  if (series.length === 0) return '<p>n/a</p>';
+
+  return renderMultiLineChart(series, {
+    from: new Date(`${detail.from}T00:00:00.000Z`),
+    to: new Date(`${detail.to}T23:59:59.999Z`),
+    unit: 'USD',
+    gapMs: TOKEN_GAP_MS,
+    indicator: 'market_cap_usd',
   });
 }
 
@@ -581,7 +611,9 @@ ${tokenChart(detail, 'volume_24h_usd', 'USD', detail.volumePoints)}
 </section>
 <section>
 <h2>Market cap (last 14 days)</h2>
-${tokenChart(detail, 'market_cap_usd', 'USD', detail.marketCapPoints)}
+${tokenMarketCapChart(detail)}
+<p class="notice">${TOKEN_ESTIMATED_NOTICE}</p>
+${detail.marketCapEstimatedPoints.length === 0 ? '<p class="muted">Estimated: n/a</p>' : ''}
 </section>
 <section>
 <h2>FDV (last 14 days)</h2>

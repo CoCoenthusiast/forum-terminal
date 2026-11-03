@@ -113,6 +113,8 @@ function tokenDetail(overrides: Partial<TokenDetail> = {}): TokenDetail {
     liquidityPoints: [],
     volumePoints: [],
     marketCapPoints: [],
+    marketCapEstimatedPoints: [],
+    impliedSupply: null,
     fdvPoints: [],
     pools: [],
     holder: null,
@@ -570,6 +572,241 @@ async function main(): Promise<void> {
     'a null market cap capture becomes a chart gap',
     (marketCapGapChart.match(/class="chart-line"/g) ?? []).length === 2 &&
       !marketCapGapChart.includes('data-value="0"')
+  );
+
+  const estimateNow = new Date('2026-11-02T12:00:00.000Z');
+  const estimateOldAt = new Date(estimateNow.getTime() - 6 * 60 * 60 * 1000);
+  const estimateCaptures = [
+    {
+      capturedAt: estimateOldAt,
+      priceUsd: 0.5,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: null,
+      fdvUsd: null,
+    },
+    {
+      capturedAt: estimateNow,
+      priceUsd: 1,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: 100,
+      fdvUsd: 120,
+    },
+  ];
+  const estimateClient = {
+    token: {
+      findFirst: async () => ({
+        address: fullAddress,
+        name: 'Test Token',
+        symbol: 'TEST',
+      }),
+    },
+    tokenCapture: {
+      findMany: async () => estimateCaptures,
+      findFirst: async () => ({ ...estimateCaptures[1], pools: [], holder: null }),
+    },
+  };
+  const estimateDetail = await readTokenDetail(
+    estimateClient as never,
+    fullAddress,
+    estimateNow
+  );
+  check(
+    'implied supply comes from the latest reported market cap',
+    estimateDetail?.impliedSupply === 100
+  );
+  check(
+    'an old capture without market cap is estimated from price',
+    estimateDetail?.marketCapEstimatedPoints.length === 1 &&
+      estimateDetail.marketCapEstimatedPoints[0]?.value === 50
+  );
+  check(
+    'a capture with reported market cap uses the reported value',
+    estimateDetail?.marketCapPoints.length === 1 &&
+      estimateDetail.marketCapPoints[0]?.value === 100
+  );
+  check(
+    'reported captures are not duplicated in the estimated series',
+    estimateDetail?.marketCapEstimatedPoints.every(
+      (point) => point.at.getTime() !== estimateNow.getTime()
+    ) ?? false
+  );
+
+  const reportedOldAt = new Date(estimateNow.getTime() - 12 * 60 * 60 * 1000);
+  const reportedCaptures = [
+    {
+      capturedAt: reportedOldAt,
+      priceUsd: 1,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: 80,
+      fdvUsd: 100,
+    },
+    {
+      capturedAt: estimateNow,
+      priceUsd: 2,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: 200,
+      fdvUsd: 240,
+    },
+  ];
+  const reportedClient = {
+    token: {
+      findFirst: async () => ({
+        address: fullAddress,
+        name: 'Test Token',
+        symbol: 'TEST',
+      }),
+    },
+    tokenCapture: {
+      findMany: async () => reportedCaptures,
+      findFirst: async () => ({ ...reportedCaptures[1], pools: [], holder: null }),
+    },
+  };
+  const reportedDetail = await readTokenDetail(
+    reportedClient as never,
+    fullAddress,
+    estimateNow
+  );
+  check(
+    'a reported capture is not replaced by an estimate',
+    reportedDetail?.marketCapPoints.length === 2 &&
+      reportedDetail.marketCapPoints[0]?.value === 80 &&
+      reportedDetail.marketCapEstimatedPoints.length === 0
+  );
+
+  const noSupplyNow = new Date('2026-11-02T12:00:00.000Z');
+  const noSupplyCaptures = [
+    {
+      capturedAt: new Date(noSupplyNow.getTime() - 6 * 60 * 60 * 1000),
+      priceUsd: 0.5,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: null,
+      fdvUsd: null,
+    },
+    {
+      capturedAt: noSupplyNow,
+      priceUsd: 1,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: null,
+      fdvUsd: null,
+    },
+  ];
+  const noSupplyClient = {
+    token: {
+      findFirst: async () => ({
+        address: fullAddress,
+        name: 'Test Token',
+        symbol: 'TEST',
+      }),
+    },
+    tokenCapture: {
+      findMany: async () => noSupplyCaptures,
+      findFirst: async () => ({ ...noSupplyCaptures[1], pools: [], holder: null }),
+    },
+  };
+  const noSupplyDetail = await readTokenDetail(
+    noSupplyClient as never,
+    fullAddress,
+    noSupplyNow
+  );
+  check(
+    'no reported market cap means no estimated series',
+    noSupplyDetail?.impliedSupply === null &&
+      noSupplyDetail.marketCapEstimatedPoints.length === 0
+  );
+  check(
+    'a missing estimated series renders n/a',
+    noSupplyDetail !== null && renderTokenDetail(noSupplyDetail).includes('Estimated: n/a')
+  );
+
+  const priceGapNow = new Date('2026-11-02T12:00:00.000Z');
+  const priceGapCaptures = [
+    {
+      capturedAt: new Date(priceGapNow.getTime() - 12 * 60 * 60 * 1000),
+      priceUsd: null,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: null,
+      fdvUsd: null,
+    },
+    {
+      capturedAt: new Date(priceGapNow.getTime() - 9 * 60 * 60 * 1000),
+      priceUsd: 0,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: null,
+      fdvUsd: null,
+    },
+    {
+      capturedAt: new Date(priceGapNow.getTime() - 3 * 60 * 60 * 1000),
+      priceUsd: 0.5,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: null,
+      fdvUsd: null,
+    },
+    {
+      capturedAt: priceGapNow,
+      priceUsd: 1,
+      liquidityUsd: 1000,
+      volume24hUsd: 2000,
+      marketCapUsd: 100,
+      fdvUsd: 120,
+    },
+  ];
+  const priceGapClient = {
+    token: {
+      findFirst: async () => ({
+        address: fullAddress,
+        name: 'Test Token',
+        symbol: 'TEST',
+      }),
+    },
+    tokenCapture: {
+      findMany: async () => priceGapCaptures,
+      findFirst: async () => ({ ...priceGapCaptures[3], pools: [], holder: null }),
+    },
+  };
+  const priceGapDetail = await readTokenDetail(
+    priceGapClient as never,
+    fullAddress,
+    priceGapNow
+  );
+  check(
+    'captures with null or zero price are omitted from the estimate',
+    priceGapDetail?.marketCapEstimatedPoints.length === 1 &&
+      priceGapDetail.marketCapEstimatedPoints[0]?.value === 50 &&
+      priceGapDetail.marketCapEstimatedPoints.every((point) => point.value > 0)
+  );
+
+  const combinedDetail = tokenDetail({
+    marketCapPoints: [{ at: new Date('2026-11-01T00:00:00.000Z'), value: 100 }],
+    marketCapEstimatedPoints: [
+      { at: new Date('2026-11-01T06:00:00.000Z'), value: 50 },
+    ],
+    impliedSupply: 100,
+  });
+  const combinedPage = renderTokenDetail(combinedDetail);
+  check('market cap chart has the reported legend', combinedPage.includes('Reported'));
+  check(
+    'market cap chart has the estimated legend',
+    combinedPage.includes('Estimated (price × latest implied supply)')
+  );
+  check(
+    'estimated market cap series is dashed',
+    combinedPage.includes('data-dashed="true"') &&
+      combinedPage.includes('stroke-dasharray="6 4"')
+  );
+  check(
+    'market cap estimate notice is present',
+    combinedPage.includes(
+      "Estimated market cap applies today's implied circulating supply to past prices; unlocks, burns and mints are not reflected, so it can be far from the true historical value."
+    )
   );
 
   const emptyTokenDetail = renderTokenDetail(tokenDetail());

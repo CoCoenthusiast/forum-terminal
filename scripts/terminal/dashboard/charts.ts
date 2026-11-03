@@ -129,15 +129,24 @@ ${circles}
 </svg>`;
 }
 
+export interface MultiLinePoint {
+  date?: string;
+  at?: Date;
+  value: number;
+}
+
 export interface MultiLineSeries {
   label: string;
-  points: readonly SeriesPoint[];
+  points: readonly MultiLinePoint[];
+  dashed?: boolean;
 }
 
 export interface MultiLineOptions {
-  from: string;
-  to: string;
+  from: string | Date;
+  to: string | Date;
   unit: string;
+  gapMs?: number;
+  indicator?: string;
 }
 
 export const MULTI_LINE_COLORS = ['#8ab4f8', '#c3a6ff', '#6dd3c1', '#e0b0ff'] as const;
@@ -149,6 +158,15 @@ function escapeXml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function multiPointMs(point: MultiLinePoint): number {
+  if (point.at !== undefined) return point.at.getTime();
+  return point.date === undefined ? Number.NaN : dayMs(point.date);
+}
+
+function optionMs(value: string | Date): number {
+  return value instanceof Date ? value.getTime() : dayMs(value);
 }
 
 export function renderMultiLineChart(
@@ -167,8 +185,8 @@ export function renderMultiLineChart(
   const plotWidth = width - padLeft - padRight;
   const plotHeight = height - padTop - padBottom;
 
-  const fromMs = dayMs(options.from);
-  const toMs = dayMs(options.to);
+  const fromMs = optionMs(options.from);
+  const toMs = optionMs(options.to);
   const spanMs = toMs - fromMs;
 
   const values = allPoints.map((point) => point.value);
@@ -181,9 +199,9 @@ export function renderMultiLineChart(
   }
   const valueSpan = max - min;
 
-  const xFor = (date: string): number => {
+  const xFor = (point: MultiLinePoint): number => {
     if (spanMs <= 0) return padLeft;
-    const ratio = (dayMs(date) - fromMs) / spanMs;
+    const ratio = (multiPointMs(point) - fromMs) / spanMs;
     return padLeft + Math.max(0, Math.min(1, ratio)) * plotWidth;
   };
   const yFor = (value: number): number =>
@@ -193,7 +211,10 @@ export function renderMultiLineChart(
     .map((item, index) => {
       const color = MULTI_LINE_COLORS[index % MULTI_LINE_COLORS.length];
       const x = padLeft + index * 140;
-      return `<rect x="${x}" y="10" width="10" height="10" fill="${color}"/><text x="${
+      const swatch = item.dashed
+        ? `<line x1="${x}" y1="15" x2="${x + 10}" y2="15" stroke="${color}" stroke-width="2" stroke-dasharray="4 3"/>`
+        : `<rect x="${x}" y="10" width="10" height="10" fill="${color}"/>`;
+      return `${swatch}<text x="${
         x + 14
       }" y="19" fill="#cfd8e3" font-size="11">${escapeXml(item.label)}</text>`;
     })
@@ -203,15 +224,15 @@ export function renderMultiLineChart(
     .map((item, index) => {
       const color = MULTI_LINE_COLORS[index % MULTI_LINE_COLORS.length];
       const ordered = [...item.points].sort(
-        (left, right) => dayMs(left.date) - dayMs(right.date)
+        (left, right) => multiPointMs(left) - multiPointMs(right)
       );
-      const segments: SeriesPoint[][] = [];
-      let current: SeriesPoint[] = [];
+      const segments: MultiLinePoint[][] = [];
+      let current: MultiLinePoint[] = [];
       for (const point of ordered) {
         const previous = current[current.length - 1];
         if (
           previous === undefined ||
-          dayMs(point.date) - dayMs(previous.date) === DAY_MS
+          multiPointMs(point) - multiPointMs(previous) <= (options.gapMs ?? DAY_MS)
         ) {
           current.push(point);
         } else {
@@ -226,20 +247,27 @@ export function renderMultiLineChart(
           const d = segment
             .map((point, pointIndex) => {
               const command = pointIndex === 0 ? 'M' : 'L';
-              return `${command}${xFor(point.date).toFixed(2)},${yFor(
+              return `${command}${xFor(point).toFixed(2)},${yFor(
                 point.value
               ).toFixed(2)}`;
             })
             .join(' ');
-          return `<path class="chart-line" d="${d}" fill="none" stroke="${color}" stroke-width="2"/>`;
+          const dashed = item.dashed
+            ? ' data-dashed="true" stroke-dasharray="6 4"'
+            : '';
+          return `<path class="chart-line"${dashed} d="${d}" fill="none" stroke="${color}" stroke-width="2"/>`;
         })
         .join('');
     })
     .join('');
 
   const unitLabel = options.unit === 'n/a' ? '' : options.unit;
+  const fromLabel = new Date(fromMs).toISOString().slice(0, 10);
+  const toLabel = new Date(toMs).toISOString().slice(0, 10);
 
-  return `<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="launchpad chart" xmlns="http://www.w3.org/2000/svg">
+  return `<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeXml(
+    options.indicator ?? 'launchpad chart'
+  )}" xmlns="http://www.w3.org/2000/svg">
 <rect x="0" y="0" width="${width}" height="${height}" fill="#12151b"/>
 ${legend}
 <line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${
@@ -255,10 +283,10 @@ ${legend}
     min
   )}</text>
 <text x="${padLeft}" y="${padTop - 10}" fill="#9aa4b2" font-size="11">${unitLabel}</text>
-<text x="${padLeft}" y="${height - 12}" fill="#9aa4b2" font-size="11">${options.from}</text>
+<text x="${padLeft}" y="${height - 12}" fill="#9aa4b2" font-size="11">${fromLabel}</text>
 <text x="${padLeft + plotWidth}" y="${
     height - 12
-  }" fill="#9aa4b2" font-size="11" text-anchor="end">${options.to}</text>
+  }" fill="#9aa4b2" font-size="11" text-anchor="end">${toLabel}</text>
 ${lines}
 </svg>`;
 }
