@@ -181,6 +181,8 @@ model TokenCapture {
   priceUsd      Decimal   @db.Decimal(38, 18)
   liquidityUsd  Decimal?  @db.Decimal(38, 2)
   volume24hUsd  Decimal?  @db.Decimal(38, 2)
+  marketCapUsd  Decimal?  @db.Decimal(38, 2)
+  fdvUsd        Decimal?  @db.Decimal(38, 2)
   txCount24h    Int?
   rawPayload    Json?
   poolsObserved   Int?

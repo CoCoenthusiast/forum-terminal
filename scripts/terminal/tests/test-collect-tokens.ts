@@ -6,6 +6,7 @@ import { Client } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/db/client';
 import { collectTokens, type FetchLike } from '../collect-tokens';
+import type { Decimal } from '../prisma-types';
 
 const NETWORK = 'solana';
 const TOKEN = 'TokenTest1111111111111111111111111111111111';
@@ -58,19 +59,34 @@ async function ensureLocalSchema(url: string): Promise<void> {
       failure: string | null;
       pool: string | null;
       holder: string | null;
+      market_cap: string | null;
+      fdv: string | null;
     }>(`
       SELECT
         to_regclass('public."Token"')::text AS token,
         to_regclass('public."TokenCapture"')::text AS capture,
         to_regclass('public."TokenCollectionFailure"')::text AS failure,
         to_regclass('public."TokenPoolCapture"')::text AS pool,
-        to_regclass('public."TokenHolderCapture"')::text AS holder
+        to_regclass('public."TokenHolderCapture"')::text AS holder,
+        (
+          SELECT column_name
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'TokenCapture'
+            AND column_name = 'marketCapUsd'
+        ) AS market_cap,
+        (
+          SELECT column_name
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'TokenCapture'
+            AND column_name = 'fdvUsd'
+        ) AS fdv
     `);
     const row = existing.rows[0];
     const oldReady = row.token !== null && row.capture !== null && row.failure !== null;
     const newReady = row.pool !== null && row.holder !== null;
 
-    if (oldReady && newReady) return;
     if (!oldReady) {
       const anyOld = row.token !== null || row.capture !== null || row.failure !== null;
       if (anyOld) throw new Error('schema local parcial: tabelas antigas incompletas');
@@ -81,6 +97,9 @@ async function ensureLocalSchema(url: string): Promise<void> {
       const anyNew = row.pool !== null || row.holder !== null;
       if (anyNew) throw new Error('schema local parcial: tabelas novas incompletas');
       await client.query(await readFile(sqlFile('2026-10-23-token-pools-holders.sql'), 'utf8'));
+    }
+    if (row.market_cap === null || row.fdv === null) {
+      await client.query(await readFile(sqlFile('2026-11-02-token-market-cap.sql'), 'utf8'));
     }
   } finally {
     await client.end();
@@ -120,21 +139,24 @@ const POOL_FIXTURES = [
   { address: 'PoolF', name: 'Pool F', dex: 'meteora', reserve: '400.00', volume: '300.00', buys: 30, sells: 300, buyers: 50, sellers: 500, created: '2024-01-03T00:00:00Z' },
 ] as const;
 
-function tokenPayload(price: string): unknown {
-  return {
-    data: {
-      attributes: {
-        address: TOKEN,
-        name: 'Te\u202Est Token',
-        symbol: '$T\u200BKN',
-        decimals: 6,
-        image_url: 'https://example.invalid/token.png',
-        price_usd: price,
-        total_reserve_in_usd: '123.4567',
-        volume_usd: { h24: '999.999' },
-      },
-    },
+function tokenPayload(
+  price: string,
+  marketCap?: string | null,
+  fdv?: string | null
+): unknown {
+  const attributes: Record<string, unknown> = {
+    address: TOKEN,
+    name: 'Te\u202Est Token',
+    symbol: '$T\u200BKN',
+    decimals: 6,
+    image_url: 'https://example.invalid/token.png',
+    price_usd: price,
+    total_reserve_in_usd: '123.4567',
+    volume_usd: { h24: '999.999' },
   };
+  if (marketCap !== undefined) attributes.market_cap_usd = marketCap;
+  if (fdv !== undefined) attributes.fdv_usd = fdv;
+  return { data: { attributes } };
 }
 
 function poolsPayload(): unknown {
@@ -306,6 +328,75 @@ async function runIdempotent(prisma: PrismaClient): Promise<void> {
   check('idempotência: token não duplicou', (await prisma.token.count({ where: { address: TOKEN } })) === 1);
 }
 
+async function runMarketCap(prisma: PrismaClient): Promise<void> {
+  const run = async (
+    payload: unknown
+  ): Promise<{
+    result: Awaited<ReturnType<typeof collectTokens>>;
+    capture: { marketCapUsd: Decimal | null; fdvUsd: Decimal | null } | null;
+  }> => {
+    await cleanup(prisma);
+    const fake = fakeFetch((url) => {
+      const kind = callKind(url);
+      if (kind === 'pools') return json(200, poolsPayload());
+      if (kind === 'info') return json(200, infoPayload());
+      return json(200, payload);
+    });
+    const result = await collectTokens({
+      tokens: [TOKEN],
+      prisma,
+      fetchImpl: fake.fetchImpl,
+      intervalMs: 0,
+      now: () => FIXED_NOW,
+      log: () => {},
+      logError: () => {},
+    });
+    const token = await getToken(prisma);
+    const capture =
+      token === null
+        ? null
+        : await prisma.tokenCapture.findFirst({
+            where: { tokenId: token.id },
+            select: { marketCapUsd: true, fdvUsd: true },
+          });
+    return { result, capture };
+  };
+
+  const marketCap = '12345678901234567890.12';
+  const fdv = '98765432109876543210.98';
+  const filled = await run(tokenPayload('2.0', marketCap, fdv));
+  check(
+    'market cap: execução ok',
+    filled.result.ok === 1 && filled.result.failures === 0
+  );
+  check(
+    'market cap: marketCapUsd gravado sem perder precisão',
+    filled.capture?.marketCapUsd?.toFixed(2) === marketCap,
+    `(${filled.capture?.marketCapUsd?.toFixed(2)})`
+  );
+  check(
+    'market cap: fdvUsd gravado sem perder precisão',
+    filled.capture?.fdvUsd?.toFixed(2) === fdv,
+    `(${filled.capture?.fdvUsd?.toFixed(2)})`
+  );
+
+  const missing = await run(tokenPayload('3.0', undefined, null));
+  check(
+    'market cap: ausente ou nulo vira null',
+    missing.capture !== null &&
+      missing.capture.marketCapUsd === null &&
+      missing.capture.fdvUsd === null
+  );
+
+  const invalid = await run(tokenPayload('4.0', 'not-a-number', 'NaN'));
+  check(
+    'market cap: valor inválido vira null',
+    invalid.capture !== null &&
+      invalid.capture.marketCapUsd === null &&
+      invalid.capture.fdvUsd === null
+  );
+}
+
 async function runRateLimit(prisma: PrismaClient): Promise<void> {
   await cleanup(prisma);
   const fake = fakeFetch((url) => {
@@ -472,6 +563,7 @@ async function main(): Promise<void> {
     prisma = new PrismaClient({ adapter });
 
     await runIdempotent(prisma);
+    await runMarketCap(prisma);
     await runRateLimit(prisma);
     await runInfo404(prisma);
     await runFailureLog(prisma);

@@ -65,6 +65,8 @@ interface TokenData {
   priceUsd: Decimal;
   liquidityUsd: Decimal | null;
   volume24hUsd: Decimal | null;
+  marketCapUsd: Decimal | null;
+  fdvUsd: Decimal | null;
 }
 
 interface PoolData {
@@ -240,6 +242,8 @@ function parseToken(payload: unknown): TokenData | null {
     priceUsd,
     liquidityUsd: roundTo(toDecimal(attributes.total_reserve_in_usd), 2),
     volume24hUsd: roundTo(toDecimal(volume?.h24), 2),
+    marketCapUsd: roundTo(toDecimal(attributes.market_cap_usd), 2),
+    fdvUsd: roundTo(toDecimal(attributes.fdv_usd), 2),
   };
 }
 
@@ -531,6 +535,8 @@ async function persist(
       priceUsd: token.priceUsd,
       liquidityUsd: token.liquidityUsd,
       volume24hUsd: token.volume24hUsd,
+      marketCapUsd: token.marketCapUsd,
+      fdvUsd: token.fdvUsd,
       txCount24h: null,
       rawPayload: Prisma.DbNull,
       poolsObserved,
@@ -542,6 +548,8 @@ async function persist(
       priceUsd: token.priceUsd,
       liquidityUsd: token.liquidityUsd,
       volume24hUsd: token.volume24hUsd,
+      marketCapUsd: token.marketCapUsd,
+      fdvUsd: token.fdvUsd,
       txCount24h: null,
       rawPayload: Prisma.DbNull,
       poolsObserved,
