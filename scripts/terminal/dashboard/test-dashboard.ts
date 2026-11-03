@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createDashboardServer, HOST } from './server';
 import {
   DASHBOARD_FOOTER,
+  INTEGRATED_NOTICE,
   renderDataHealth,
   renderLaunchpads,
   renderLeverageMacro,
@@ -21,6 +22,16 @@ import {
   renderTimeLineChart,
 } from './charts';
 import type { IndicatorSeries } from './series-reader';
+import {
+  HOURLY_STALE_HOURS,
+  HOURLY_WINDOW_HOURS,
+  readHyperliquidDaily,
+  readHyperliquidHourly,
+  readLaunchpadHourly,
+  readLatestPrices,
+  readOverviewDaily,
+  readOverviewHourly,
+} from './hourly-reader';
 import {
   readTokenDetail,
   readTokenSummaries,
@@ -44,6 +55,8 @@ function check(name: string, ok: boolean, extra = ''): void {
 function metric(value: number | null): RecapMetric {
   return { value, unit: null, asOf: null, dataAsOf: null };
 }
+
+const HOUR_MS = 60 * 60 * 1000;
 
 function emptyInput(): RecapInput {
   return {
@@ -212,6 +225,503 @@ async function main(): Promise<void> {
   );
   check('launchpads page has the dashboard footer', launchpadsPage.includes(DASHBOARD_FOOTER));
 
+  interface HourlyQuery {
+    where?: { collectedAt?: { gte?: Date; lte?: Date } };
+    take?: number;
+  }
+
+  interface LatestPriceQuery {
+    where?: {
+      collectedAt?: { gte?: Date; lte?: Date };
+      source?: { provider?: string };
+    };
+    take?: number;
+  }
+
+  const hourlyNow = new Date('2026-11-02T12:00:00.000Z');
+  const hourlyQueries: HourlyQuery[] = [];
+  const recentAt = new Date(hourlyNow.getTime() - HOUR_MS);
+  const recentRows = [
+    { scope: 'solana', metric: 'tvl_usd', value: 1234.5, unit: 'USD', collectedAt: recentAt },
+    {
+      scope: 'global',
+      metric: 'btc_dominance_pct',
+      value: 55.5,
+      unit: 'PERCENT',
+      collectedAt: recentAt,
+    },
+  ];
+  const recentClient = {
+    metricSnapshot: {
+      findMany: async (args: HourlyQuery) => {
+        hourlyQueries.push(args);
+        return recentRows;
+      },
+    },
+  };
+  const recentHourly = await readOverviewHourly(recentClient as never, hourlyNow);
+  const recentTvl = recentHourly.find(
+    (row) => row.scope === 'solana' && row.metric === 'tvl_usd'
+  );
+  check(
+    'a recent hourly capture is fresh',
+    recentTvl?.value === 1234.5 &&
+      recentTvl.stale === false &&
+      recentTvl.ageMs === HOUR_MS
+  );
+  check(
+    'the hourly query uses a 6h window',
+    hourlyQueries[0]?.where?.collectedAt?.gte?.getTime() ===
+      hourlyNow.getTime() - HOURLY_WINDOW_HOURS * HOUR_MS
+  );
+  check('the hourly query has a limit', (hourlyQueries[0]?.take ?? 0) > 0);
+
+  const recentOverview = renderOverview(emptyInput(), recentHourly);
+  check(
+    'overview integrates hourly values into market activity',
+    recentOverview.includes('<h2>Market activity</h2>') &&
+      recentOverview.includes(INTEGRATED_NOTICE) &&
+      !recentOverview.includes('Latest hourly capture') &&
+      !recentOverview.includes('<h2>Latest price</h2>')
+  );
+  check(
+    'overview has closed and latest columns',
+    recentOverview.includes('<th>Metric</th><th>Closed</th><th>Latest</th>')
+  );
+  check(
+    'overview activity shows latest value, UTC time and age',
+    recentOverview.includes('1,234.5 USD') &&
+      recentOverview.includes('2026-11-02 11:00 UTC') &&
+      recentOverview.includes('1h 0m')
+  );
+
+  const staleAt = new Date(
+    hourlyNow.getTime() - (HOURLY_STALE_HOURS + 1) * HOUR_MS
+  );
+  const staleRows = [
+    { scope: 'solana', metric: 'tvl_usd', value: 99, unit: 'USD', collectedAt: staleAt },
+  ];
+  const staleClient = {
+    metricSnapshot: { findMany: async () => staleRows },
+  };
+  const staleHourly = await readOverviewHourly(staleClient as never, hourlyNow);
+  const staleTvl = staleHourly.find(
+    (row) => row.scope === 'solana' && row.metric === 'tvl_usd'
+  );
+  check(
+    'a capture older than 3h is stale',
+    staleTvl?.stale === true &&
+      staleTvl.ageMs === (HOURLY_STALE_HOURS + 1) * HOUR_MS
+  );
+  const staleOverview = renderOverview(emptyInput(), staleHourly);
+  check(
+    'a stale hourly capture shows the last value, age and stale marker',
+    staleOverview.includes('99 USD') &&
+      staleOverview.includes('4h 0m') &&
+      staleOverview.includes('stale')
+  );
+
+  const emptyHourlyClient = {
+    metricSnapshot: { findMany: async () => [] },
+  };
+  const noHourly = await readOverviewHourly(emptyHourlyClient as never, hourlyNow);
+  check(
+    'no hourly capture yields n/a fields',
+    noHourly.every(
+      (row) =>
+        row.value === null &&
+        row.collectedAt === null &&
+        row.ageMs === null &&
+        row.stale === false
+    )
+  );
+  const noHourlyOverview = renderOverview(emptyInput(), noHourly);
+  check(
+    'no hourly capture renders n/a in latest columns, never zero',
+    noHourlyOverview.includes('<th>Latest</th>') &&
+      noHourlyOverview.includes('<td>n/a</td>') &&
+      !noHourlyOverview.includes('0 USD')
+  );
+
+  const partialRows = [
+    { scope: 'solana', metric: 'tvl_usd', value: 1, unit: 'USD', collectedAt: hourlyNow },
+  ];
+  const partialClient = {
+    metricSnapshot: { findMany: async () => partialRows },
+  };
+  const partialHourly = await readOverviewHourly(partialClient as never, hourlyNow);
+  const missingMetric = partialHourly.find(
+    (row) => row.metric === 'stablecoin_supply_usd'
+  );
+  check(
+    'a missing hourly metric is n/a',
+    missingMetric?.value === null &&
+      missingMetric.collectedAt === null &&
+      missingMetric.ageMs === null
+  );
+  check(
+    'a missing hourly metric renders n/a, not zero',
+    renderOverview(emptyInput(), partialHourly).includes(
+      'Stablecoins</th><td>n/a</td><td>n/a</td>'
+    )
+  );
+
+  interface DailyQuery {
+    where?: {
+      asOf?: { lte?: Date };
+      status?: string;
+    };
+    take?: number;
+  }
+
+  const overviewDailyRows = [
+    {
+      scope: 'solana',
+      indicator: 'tvl_usd',
+      value: 2000,
+      unit: 'USD',
+      asOf: new Date('2026-11-01T00:00:00.000Z'),
+    },
+    {
+      scope: 'solana',
+      indicator: 'stablecoin_supply_usd',
+      value: 3000,
+      unit: 'USD',
+      asOf: new Date('2026-11-01T00:00:00.000Z'),
+    },
+    {
+      scope: 'solana',
+      indicator: 'dex_volume_24h_usd',
+      value: 4000,
+      unit: 'USD',
+      asOf: new Date('2026-11-01T00:00:00.000Z'),
+    },
+    {
+      scope: 'global',
+      indicator: 'global_market_cap_usd',
+      value: 5000,
+      unit: 'USD',
+      asOf: new Date('2026-11-01T00:00:00.000Z'),
+    },
+    {
+      scope: 'global',
+      indicator: 'btc_dominance_pct',
+      value: 55,
+      unit: 'PERCENT',
+      asOf: new Date('2026-11-01T00:00:00.000Z'),
+    },
+  ];
+  const overviewDailyQueries: DailyQuery[] = [];
+  const overviewDailyClient = {
+    indicatorSnapshot: {
+      findMany: async (args: DailyQuery) => {
+        overviewDailyQueries.push(args);
+        return overviewDailyRows;
+      },
+    },
+  };
+  const overviewDaily = await readOverviewDaily(
+    overviewDailyClient as never,
+    '2026-11-01'
+  );
+  check(
+    'overview daily query reads ok indicator snapshots up to the closed day',
+    overviewDailyQueries[0]?.where?.status === 'ok' &&
+      overviewDailyQueries[0]?.where?.asOf?.lte?.toISOString() ===
+        '2026-11-01T00:00:00.000Z'
+  );
+  check(
+    'overview daily values come from indicator snapshots',
+    overviewDaily.find((row) => row.metric === 'tvl_usd')?.value === 2000
+  );
+  const integratedOverview = renderOverview(
+    emptyInput(),
+    recentHourly,
+    [],
+    overviewDaily
+  );
+  check(
+    'overview shows closed and latest values side by side',
+    integratedOverview.includes('2,000 USD') &&
+      integratedOverview.includes('1,234.5 USD') &&
+      integratedOverview.includes('Closed 2026-11-01')
+  );
+  check(
+    'overview labels the closed day',
+    integratedOverview.includes('Computed on closed day 2026-11-01')
+  );
+
+  const hyperRows = [
+    {
+      scope: 'hyperliquid:perp:SOL',
+      metric: 'perp_funding_rate_1h',
+      value: 0.0001,
+      unit: 'FRACTION',
+      collectedAt: recentAt,
+    },
+  ];
+  const hyperClient = {
+    metricSnapshot: { findMany: async () => hyperRows },
+  };
+  const hyperHourly = await readHyperliquidHourly(hyperClient as never, hourlyNow);
+  check('hyperliquid hourly covers 3 coins x 4 metrics', hyperHourly.length === 12);
+  check(
+    'hyperliquid missing metrics are n/a',
+    hyperHourly.filter((row) => row.value === null).length === 11
+  );
+
+  const hyperDailyRows = [
+    {
+      scope: 'hyperliquid:perp:SOL',
+      indicator: 'perp_funding_rate_1h',
+      value: 0.0002,
+      unit: 'FRACTION',
+      asOf: new Date('2026-11-01T00:00:00.000Z'),
+    },
+  ];
+  const hyperDailyClient = {
+    indicatorSnapshot: { findMany: async () => hyperDailyRows },
+  };
+  const hyperDaily = await readHyperliquidDaily(
+    hyperDailyClient as never,
+    '2026-11-01'
+  );
+  check(
+    'hyperliquid daily covers 3 coins x 4 metrics',
+    hyperDaily.length === 12
+  );
+  check(
+    'hyperliquid daily missing metrics are n/a',
+    hyperDaily.filter((row) => row.value === null).length === 11
+  );
+  const hyperPage = renderLeverageMacro(
+    [],
+    [],
+    hyperHourly,
+    hyperDaily,
+    '2026-11-01'
+  );
+  check(
+    'leverage & macro integrates Hyperliquid daily and latest',
+    hyperPage.includes('<h2>Hyperliquid</h2>') &&
+      hyperPage.includes(INTEGRATED_NOTICE) &&
+      hyperPage.includes('0.0002 FRACTION') &&
+      hyperPage.includes('0.0001 FRACTION') &&
+      hyperPage.includes('Closed 2026-11-01') &&
+      hyperPage.includes('Computed on closed day 2026-11-01')
+  );
+  check(
+    'hyperliquid values stay raw',
+    hyperPage.includes('0.0001 FRACTION') && !hyperPage.includes('0.01%')
+  );
+
+  const launchHourlyRows = [
+    {
+      scope: 'solana:protocol:pump.fun',
+      metric: 'dex_volume_24h_usd',
+      value: 100,
+      unit: 'USD',
+      collectedAt: recentAt,
+    },
+    {
+      scope: 'solana:protocol:pump.fun',
+      metric: 'fees_24h_usd',
+      value: 5,
+      unit: 'USD',
+      collectedAt: recentAt,
+    },
+  ];
+  const launchHourlyClient = {
+    metricSnapshot: { findMany: async () => launchHourlyRows },
+  };
+  const launchHourly = await readLaunchpadHourly(
+    launchHourlyClient as never,
+    hourlyNow
+  );
+  check('launchpad hourly covers 8 slugs x 2 metrics', launchHourly.length === 16);
+  check(
+    'launchpad missing metrics are n/a',
+    launchHourly.filter((row) => row.value === null).length === 14
+  );
+  const launchHourlyPage = renderLaunchpads([], launchHourly, '2026-11-01');
+  check(
+    'launchpads integrates hourly columns into the platform table',
+    launchHourlyPage.includes('<th>Latest 24h volume</th><th>Latest 24h fees</th>') &&
+      launchHourlyPage.includes(INTEGRATED_NOTICE) &&
+      !launchHourlyPage.includes('Hourly protocol activity')
+  );
+  check(
+    'launchpad latest columns show both hourly values',
+    launchHourlyPage.includes('100 USD') &&
+      launchHourlyPage.includes('5 USD') &&
+      launchHourlyPage.includes('pump.fun')
+  );
+  check(
+    'launchpads labels the closed day',
+    launchHourlyPage.includes('Computed on closed day 2026-11-01')
+  );
+
+  const latestPriceQueries: LatestPriceQuery[] = [];
+  const latestPriceRows = [
+    {
+      asset: 'solana',
+      priceUsd: 150,
+      collectedAt: recentAt,
+      source: { provider: 'coingecko' },
+    },
+    {
+      asset: 'bitcoin',
+      priceUsd: 60000,
+      collectedAt: recentAt,
+      source: { provider: 'coingecko' },
+    },
+    {
+      asset: 'ethereum',
+      priceUsd: 3000,
+      collectedAt: recentAt,
+      source: { provider: 'coingecko' },
+    },
+  ];
+  const latestPriceClient = {
+    marketSnapshot: {
+      findMany: async (args: LatestPriceQuery) => {
+        latestPriceQueries.push(args);
+        return latestPriceRows;
+      },
+    },
+  };
+  const latestPrices = await readLatestPrices(
+    latestPriceClient as never,
+    hourlyNow
+  );
+  const latestSol = latestPrices.find((row) => row.asset === 'solana');
+  check(
+    'a recent latest price capture is fresh',
+    latestSol?.priceUsd === 150 &&
+      latestSol.stale === false &&
+      latestSol.ageMs === HOUR_MS
+  );
+  check(
+    'the latest price query uses a 6h window',
+    latestPriceQueries[0]?.where?.collectedAt?.gte?.getTime() ===
+      hourlyNow.getTime() - HOURLY_WINDOW_HOURS * HOUR_MS
+  );
+  check(
+    'the latest price query has a limit',
+    (latestPriceQueries[0]?.take ?? 0) > 0
+  );
+  check(
+    'the latest price query filters coingecko',
+    latestPriceQueries[0]?.where?.source?.provider === 'coingecko'
+  );
+
+  const latestPricePage = renderOverview(emptyInput(), [], latestPrices);
+  check(
+    'latest prices integrate into the Prices table',
+    latestPricePage.includes('<th>Asset</th><th>Closed</th><th>Latest</th>') &&
+      !latestPricePage.includes('<h2>Latest price</h2>')
+  );
+  check(
+    'integrated latest prices show SOL, BTC and ETH values, UTC and age',
+    latestPricePage.includes('$150.00') &&
+      latestPricePage.includes('$60,000.00') &&
+      latestPricePage.includes('$3,000.00') &&
+      latestPricePage.includes('2026-11-02 11:00 UTC') &&
+      latestPricePage.includes('1h 0m')
+  );
+  check(
+    'overview has a 300s meta refresh',
+    latestPricePage.includes('<meta http-equiv="refresh" content="300">')
+  );
+
+  const stalePriceAt = new Date(
+    hourlyNow.getTime() - (HOURLY_STALE_HOURS + 1) * HOUR_MS
+  );
+  const stalePriceRows = [
+    {
+      asset: 'solana',
+      priceUsd: 99,
+      collectedAt: stalePriceAt,
+      source: { provider: 'coingecko' },
+    },
+  ];
+  const stalePriceClient = {
+    marketSnapshot: { findMany: async () => stalePriceRows },
+  };
+  const stalePrices = await readLatestPrices(
+    stalePriceClient as never,
+    hourlyNow
+  );
+  const staleSol = stalePrices.find((row) => row.asset === 'solana');
+  check(
+    'a latest price capture older than 3h is stale',
+    staleSol?.stale === true &&
+      staleSol.ageMs === (HOURLY_STALE_HOURS + 1) * HOUR_MS
+  );
+  const stalePricePage = renderOverview(emptyInput(), [], stalePrices);
+  check(
+    'a stale latest price shows value, age and stale marker',
+    stalePricePage.includes('$99.00') &&
+      stalePricePage.includes('4h 0m') &&
+      stalePricePage.includes('stale')
+  );
+
+  const noPriceClient = {
+    marketSnapshot: { findMany: async () => [] },
+  };
+  const noPrices = await readLatestPrices(noPriceClient as never, hourlyNow);
+  check(
+    'no latest price capture yields n/a fields',
+    noPrices.every(
+      (row) =>
+        row.priceUsd === null &&
+        row.collectedAt === null &&
+        row.ageMs === null &&
+        row.stale === false
+    )
+  );
+  const noPricePage = renderOverview(emptyInput(), [], noPrices);
+  check(
+    'no latest price capture renders n/a in the latest column, never zero',
+    noPricePage.includes('<th>Asset</th><th>Closed</th><th>Latest</th>') &&
+      noPricePage.includes('<td>n/a</td>') &&
+      !noPricePage.includes('$0.00')
+  );
+
+  const historyRows = [
+    {
+      asset: 'solana',
+      priceUsd: 999,
+      collectedAt: new Date(hourlyNow.getTime() - 10 * 60 * 1000),
+      source: { provider: 'coingecko_history' },
+    },
+    {
+      asset: 'solana',
+      priceUsd: 100,
+      collectedAt: new Date(hourlyNow.getTime() - 2 * HOUR_MS),
+      source: { provider: 'coingecko' },
+    },
+  ];
+  const historyClient = {
+    marketSnapshot: { findMany: async () => historyRows },
+  };
+  const historyPrices = await readLatestPrices(
+    historyClient as never,
+    hourlyNow
+  );
+  const historySol = historyPrices.find((row) => row.asset === 'solana');
+  check(
+    'coingecko_history rows are ignored',
+    historySol?.priceUsd === 100 && historySol.ageMs === 2 * HOUR_MS
+  );
+  const historyPage = renderOverview(emptyInput(), [], historyPrices);
+  check(
+    'coingecko_history values never appear in integrated prices',
+    historyPage.includes('$100.00') &&
+      !historyPage.includes('$999.00') &&
+      !historyPage.includes('coingecko_history')
+  );
+
   const sharePage = renderLaunchpads([
     {
       indicator: 'launchpad_dex_volume_share_7d',
@@ -318,6 +828,24 @@ async function main(): Promise<void> {
   check('data health shows the overall result', health.includes('FAIL'));
   check('data health renders n/a when there are no checks', health.includes('n/a'));
   check('data health has the dashboard footer', health.includes(DASHBOARD_FOOTER));
+
+  const refreshMeta = '<meta http-equiv="refresh" content="300">';
+  check(
+    'data health has a 300s meta refresh',
+    renderDataHealth([], 'OK', '2026-11-01').includes(refreshMeta)
+  );
+  check(
+    'leverage & macro has a 300s meta refresh',
+    renderLeverageMacro([], []).includes(refreshMeta)
+  );
+  check(
+    'launchpads has a 300s meta refresh',
+    renderLaunchpads([]).includes(refreshMeta)
+  );
+  check(
+    'tokens has a 300s meta refresh',
+    renderTokens([]).includes(refreshMeta)
+  );
 
   const emptyTokensPage = renderTokens([]);
   check('tokens page shows n/a for an empty table', emptyTokensPage.includes('n/a'));

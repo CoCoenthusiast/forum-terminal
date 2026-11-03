@@ -10,10 +10,21 @@ import {
 } from './charts';
 import type { IndicatorSeries } from './series-reader';
 import { escapeHtml, sanitizeHtml, sanitizeText } from './sanitize';
+import {
+  HOURLY_LAUNCHPAD_SLUGS,
+  HYPERLIQUID_COINS,
+  HYPERLIQUID_INDICATORS,
+  type DailyMetricValue,
+  type HourlyMetricValue,
+  type LatestPriceValue,
+} from './hourly-reader';
 import type { TokenChartPoint, TokenDetail, TokenSummary } from './token-reader';
 
 export const DASHBOARD_FOOTER =
   'Local read-only dashboard. Data: CoinGecko, DefiLlama, Coinalyze, U.S. Treasury, Federal Reserve. Not financial advice.';
+
+export const INTEGRATED_NOTICE =
+  'Latest = rolling hourly capture. Closed = daily series. Not comparable.';
 
 const PRICE_ORDER = ['SOL', 'BTC', 'ETH'] as const;
 
@@ -49,11 +60,168 @@ function formatPrice(metric: RecapMetric | null | undefined): string {
   return USD_FORMATTER.format(value);
 }
 
-function priceRow(input: RecapInput, asset: string): string {
+const HOURLY_VALUE_FORMATTER = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 6,
+});
+
+function formatHourlyValue(value: number | null, unit: string | null): string {
+  if (value === null) return 'n/a';
+  const formatted = HOURLY_VALUE_FORMATTER.format(value);
+  return unit !== null && unit.length > 0 && unit !== 'n/a'
+    ? `${formatted} ${unit}`
+    : formatted;
+}
+
+function formatHourlyAge(ageMs: number | null): string {
+  if (ageMs === null) return 'n/a';
+  const totalMinutes = Math.max(0, Math.floor(ageMs / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function formatHourlyUtc(collectedAt: Date | null): string {
+  if (collectedAt === null) return 'n/a';
+  return `${collectedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+function formatClosedDate(asOf: Date | null): string {
+  return asOf === null ? 'n/a' : asOf.toISOString().slice(0, 10);
+}
+
+function ageCell(ageMs: number | null, stale: boolean): string {
+  const age = formatHourlyAge(ageMs);
+  if (age === 'n/a') return 'n/a';
+  return stale ? `${age} <span class="warn">stale</span>` : age;
+}
+
+const PRICE_ASSET_BY_LABEL: Record<string, string> = {
+  SOL: 'solana',
+  BTC: 'bitcoin',
+  ETH: 'ethereum',
+};
+
+const LATEST_PRICE_LABELS: Record<string, string> = {
+  solana: 'SOL',
+  bitcoin: 'BTC',
+  ethereum: 'ETH',
+};
+
+const ACTIVITY_LABELS: Record<string, string> = {
+  tvl_usd: 'TVL',
+  stablecoin_supply_usd: 'Stablecoins',
+  dex_volume_24h_usd: 'DEX volume 24h',
+  global_market_cap_usd: 'Global market cap',
+  btc_dominance_pct: 'BTC dominance',
+};
+
+function latestPriceLabel(asset: string): string {
+  return LATEST_PRICE_LABELS[asset] ?? asset;
+}
+
+function activityLabel(metric: string): string {
+  return ACTIVITY_LABELS[metric] ?? metric;
+}
+
+function closedPriceCell(metric: RecapMetric | null | undefined): string {
+  const value = formatPrice(metric);
+  const date = metricDate(metric);
+  if (value === 'n/a' && date === null) return 'n/a';
+  return `${escapeHtml(value)}<br><span class="muted">Closed ${escapeHtml(
+    date ?? 'n/a'
+  )}</span>`;
+}
+
+function latestPriceCell(row: LatestPriceValue | undefined): string {
+  if (row === undefined || row.collectedAt === null) return 'n/a';
+  const value =
+    row.priceUsd === null ? 'n/a' : USD_FORMATTER.format(row.priceUsd);
+  return `${escapeHtml(value)}<br><span class="muted">${escapeHtml(
+    formatHourlyUtc(row.collectedAt)
+  )} · ${ageCell(row.ageMs, row.stale)}</span>`;
+}
+
+function closedMetricCell(row: DailyMetricValue | undefined): string {
+  if (row === undefined || row.value === null) return 'n/a';
+  return `${escapeHtml(formatHourlyValue(row.value, row.unit))}<br><span class="muted">Closed ${escapeHtml(
+    formatClosedDate(row.asOf)
+  )}</span>`;
+}
+
+function latestMetricCell(row: HourlyMetricValue | undefined): string {
+  if (row === undefined || row.collectedAt === null) return 'n/a';
+  return `${escapeHtml(formatHourlyValue(row.value, row.unit))}<br><span class="muted">${escapeHtml(
+    formatHourlyUtc(row.collectedAt)
+  )} · ${ageCell(row.ageMs, row.stale)}</span>`;
+}
+
+function findHourly(
+  rows: readonly HourlyMetricValue[],
+  scope: string,
+  metric: string
+): HourlyMetricValue | undefined {
+  return rows.find((row) => row.scope === scope && row.metric === metric);
+}
+
+function findDaily(
+  rows: readonly DailyMetricValue[],
+  scope: string,
+  metric: string
+): DailyMetricValue | undefined {
+  return rows.find((row) => row.scope === scope && row.metric === metric);
+}
+
+function hyperliquidCoinLabel(scope: string): string {
+  const parts = scope.split(':');
+  return parts[parts.length - 1] ?? scope;
+}
+
+function launchpadScopeLabel(scope: string): string {
+  const slug = scope.startsWith('solana:protocol:')
+    ? scope.slice('solana:protocol:'.length)
+    : scope;
+  return LAUNCHPAD_LABELS[slug] ?? slug;
+}
+
+const OVERVIEW_ACTIVITY_METRICS = [
+  'tvl_usd',
+  'stablecoin_supply_usd',
+  'dex_volume_24h_usd',
+  'global_market_cap_usd',
+  'btc_dominance_pct',
+] as const;
+
+function priceRow(
+  input: RecapInput,
+  asset: string,
+  latestPrices: readonly LatestPriceValue[]
+): string {
   const price = input.prices.find((item) => item.asset.toUpperCase() === asset) ?? null;
-  return `<tr><th scope="row">${escapeHtml(asset)}</th><td>${escapeHtml(
-    formatPrice(price?.priceUsd)
-  )}</td></tr>`;
+  const latest = latestPrices.find(
+    (row) => row.asset === PRICE_ASSET_BY_LABEL[asset]
+  );
+  return `<tr><th scope="row">${escapeHtml(asset)}</th><td>${closedPriceCell(
+    price?.priceUsd
+  )}</td><td>${latestPriceCell(latest)}</td></tr>`;
+}
+
+function overviewActivityRows(
+  hourly: readonly HourlyMetricValue[],
+  daily: readonly DailyMetricValue[]
+): string {
+  return OVERVIEW_ACTIVITY_METRICS.map((metric) => {
+    const scope =
+      metric === 'global_market_cap_usd' || metric === 'btc_dominance_pct'
+        ? 'global'
+        : 'solana';
+    return `<tr><th scope="row">${escapeHtml(
+      activityLabel(metric)
+    )}</th><td>${closedMetricCell(
+      findDaily(daily, scope, metric)
+    )}</td><td>${latestMetricCell(
+      findHourly(hourly, scope, metric)
+    )}</td></tr>`;
+  }).join('');
 }
 
 function regimeText(input: RecapInput): string {
@@ -91,13 +259,21 @@ function healthRows(results: readonly FreshnessResult[]): string {
     .join('');
 }
 
-export function renderPage(title: string, body: string): string {
+export function renderPage(
+  title: string,
+  body: string,
+  refreshSeconds = 300
+): string {
+  const refresh = `<meta http-equiv="refresh" content="${Math.max(
+    1,
+    Math.floor(refreshSeconds)
+  )}">\n`;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
+${refresh}<title>${escapeHtml(title)}</title>
 <style>
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
@@ -140,7 +316,12 @@ ${body}
 </html>`;
 }
 
-export function renderOverview(input: RecapInput): string {
+export function renderOverview(
+  input: RecapInput,
+  hourly: readonly HourlyMetricValue[] = [],
+  latestPrices: readonly LatestPriceValue[] = [],
+  daily: readonly DailyMetricValue[] = []
+): string {
   const asOf = typeof input.asOf === 'string' && input.asOf.length > 0 ? input.asOf : 'n/a';
   const leverageDate = oldestDate([
     input.leverage.oiUsdChange7dPct,
@@ -160,13 +341,27 @@ export function renderOverview(input: RecapInput): string {
 </section>
 <section>
 <h2>Prices</h2>
+<p class="notice">${escapeHtml(INTEGRATED_NOTICE)}</p>
+<p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
 <table>
-<thead><tr><th>Asset</th><th>Price</th></tr></thead>
-<tbody>${PRICE_ORDER.map((asset) => priceRow(input, asset)).join('')}</tbody>
+<thead><tr><th>Asset</th><th>Closed</th><th>Latest</th></tr></thead>
+<tbody>${PRICE_ORDER.map((asset) =>
+    priceRow(input, asset, latestPrices)
+  ).join('')}</tbody>
+</table>
+</section>
+<section>
+<h2>Market activity</h2>
+<p class="notice">${escapeHtml(INTEGRATED_NOTICE)}</p>
+<p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
+<table>
+<thead><tr><th>Metric</th><th>Closed</th><th>Latest</th></tr></thead>
+<tbody>${overviewActivityRows(hourly, daily)}</tbody>
 </table>
 </section>
 <section>
 <h2>Regime</h2>
+<p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
 <p>${escapeHtml(regimeText(input))}</p>
 </section>
 <section>
@@ -181,7 +376,7 @@ ${blockDateRow('Launchpads', launchpadDate, input.asOf)}
 </table>
 </section>`;
 
-  return renderPage('Overview', body);
+  return renderPage('Overview', body, 300);
 }
 
 export function renderDataHealth(
@@ -215,9 +410,30 @@ ${renderLineChart(series)}
 </article>`;
 }
 
+function hyperliquidRows(
+  hourly: readonly HourlyMetricValue[],
+  daily: readonly DailyMetricValue[]
+): string {
+  return HYPERLIQUID_COINS.flatMap((coin) =>
+    HYPERLIQUID_INDICATORS.map((metric) => {
+      const scope = `hyperliquid:perp:${coin}`;
+      return `<tr><th scope="row">${escapeHtml(
+        hyperliquidCoinLabel(scope)
+      )}</th><td>${escapeHtml(metric)}</td><td>${closedMetricCell(
+        findDaily(daily, scope, metric)
+      )}</td><td>${latestMetricCell(
+        findHourly(hourly, scope, metric)
+      )}</td></tr>`;
+    })
+  ).join('');
+}
+
 export function renderLeverageMacro(
   leverage: readonly IndicatorSeries[],
-  macro: readonly IndicatorSeries[]
+  macro: readonly IndicatorSeries[],
+  hyperliquidHourly: readonly HourlyMetricValue[] = [],
+  hyperliquidDaily: readonly DailyMetricValue[] = [],
+  asOf = 'n/a'
 ): string {
   const leverageCharts =
     leverage.length === 0 ? '<p>n/a</p>' : leverage.map(chartArticle).join('\n');
@@ -230,11 +446,22 @@ export function renderLeverageMacro(
 </section>
 <section>
 <h2>Leverage, SOL (Coinalyze)</h2>
+<p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
 ${leverageCharts}
 </section>
 <section>
 <h2>Macro (US)</h2>
+<p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
 ${macroCharts}
+</section>
+<section>
+<h2>Hyperliquid</h2>
+<p class="notice">${escapeHtml(INTEGRATED_NOTICE)}</p>
+<p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
+<div class="table-scroll"><table>
+<thead><tr><th>Coin</th><th>Metric</th><th>Closed</th><th>Latest</th></tr></thead>
+<tbody>${hyperliquidRows(hyperliquidHourly, hyperliquidDaily)}</tbody>
+</table></div>
 </section>`;
 
   return renderPage('Leverage & macro', body);
@@ -274,28 +501,39 @@ function launchpadCell(series: IndicatorSeries | undefined): string {
   return `${formatLaunchpadValue(point.value, series.unit)} (${point.date}, ${delay}d delay)`;
 }
 
-export function renderLaunchpads(groups: readonly LaunchpadIndicatorGroup[]): string {
+export function renderLaunchpads(
+  groups: readonly LaunchpadIndicatorGroup[],
+  hourly: readonly HourlyMetricValue[] = [],
+  asOf = 'n/a'
+): string {
   const platformList = LAUNCHPAD_SLUGS.map((slug) => launchpadLabel(slug)).join(', ');
+  const platformSlugs = [
+    ...new Set([...LAUNCHPAD_SLUGS, ...HOURLY_LAUNCHPAD_SLUGS]),
+  ];
   const shareSummaryNote = groups.some((group) => group.indicator.includes('share'))
     ? `<p class="muted">share among the 4 platforms covered: ${escapeHtml(platformList)}</p>`
     : '';
 
-  const table =
-    groups.length === 0
-      ? '<p>n/a</p>'
-      : `<div class="table-scroll"><table>
+  const table = `<div class="table-scroll"><table>
 <thead><tr><th>Platform</th>${groups
-          .map((group) => `<th>${escapeHtml(group.indicator)}</th>`)
-          .join('')}</tr></thead>
-<tbody>${LAUNCHPAD_SLUGS.map((slug) => {
-          const cells = groups
-            .map((group) => {
-              const platform = group.platforms.find((item) => item.slug === slug);
-              return `<td>${escapeHtml(launchpadCell(platform?.series))}</td>`;
-            })
-            .join('');
-          return `<tr><th scope="row">${escapeHtml(launchpadLabel(slug))}</th>${cells}</tr>`;
-        }).join('')}</tbody>
+    .map((group) => `<th>${escapeHtml(group.indicator)}</th>`)
+    .join('')}<th>Latest 24h volume</th><th>Latest 24h fees</th></tr></thead>
+<tbody>${platformSlugs
+    .map((slug) => {
+      const cells = groups
+        .map((group) => {
+          const platform = group.platforms.find((item) => item.slug === slug);
+          return `<td>${escapeHtml(launchpadCell(platform?.series))}</td>`;
+        })
+        .join('');
+      const scope = `solana:protocol:${slug}`;
+      const latestVolume = findHourly(hourly, scope, 'dex_volume_24h_usd');
+      const latestFees = findHourly(hourly, scope, 'fees_24h_usd');
+      return `<tr><th scope="row">${escapeHtml(launchpadLabel(slug))}</th>${cells}<td>${latestMetricCell(
+        latestVolume
+      )}</td><td>${latestMetricCell(latestFees)}</td></tr>`;
+    })
+    .join('')}</tbody>
 </table></div>`;
 
   const charts =
@@ -332,6 +570,8 @@ ${renderMultiLineChart(
 </section>
 <section>
 <h2>Summary</h2>
+<p class="notice">${escapeHtml(INTEGRATED_NOTICE)}</p>
+<p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
 ${shareSummaryNote}
 ${table}
 </section>

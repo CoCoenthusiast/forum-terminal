@@ -28,6 +28,14 @@ import {
 } from '../indicators/launchpads';
 import { readIndicatorSeries, type SeriesTarget } from './series-reader';
 import {
+  readHyperliquidDaily,
+  readHyperliquidHourly,
+  readLaunchpadHourly,
+  readLatestPrices,
+  readOverviewDaily,
+  readOverviewHourly,
+} from './hourly-reader';
+import {
   renderDataHealth,
   renderLaunchpads,
   renderLeverageMacro,
@@ -326,8 +334,13 @@ async function handleRequest(
       return;
     }
     const client = await resolveClient();
-    const input = await readRecapInput(client, resolved.date);
-    sendHtml(res, 200, renderOverview(input));
+    const [input, hourly, latestPrices, daily] = await Promise.all([
+      readRecapInput(client, resolved.date),
+      readOverviewHourly(client, now),
+      readLatestPrices(client, now),
+      readOverviewDaily(client, resolved.date),
+    ]);
+    sendHtml(res, 200, renderOverview(input, hourly, latestPrices, daily));
     return;
   }
 
@@ -352,17 +365,20 @@ async function handleRequest(
     }
     const client = await resolveClient();
     const { leverage, macro } = leverageMacroTargets();
-    const series = await readIndicatorSeries(
-      client,
-      [...leverage, ...macro],
-      resolved.date
-    );
+    const [series, hyperliquidHourly, hyperliquidDaily] = await Promise.all([
+      readIndicatorSeries(client, [...leverage, ...macro], resolved.date),
+      readHyperliquidHourly(client, now),
+      readHyperliquidDaily(client, resolved.date),
+    ]);
     sendHtml(
       res,
       200,
       renderLeverageMacro(
         series.slice(0, leverage.length),
-        series.slice(leverage.length)
+        series.slice(leverage.length),
+        hyperliquidHourly,
+        hyperliquidDaily,
+        resolved.date
       )
     );
     return;
@@ -376,11 +392,14 @@ async function handleRequest(
     }
     const client = await resolveClient();
     const groups = launchpadTargetGroups();
-    const series = await readIndicatorSeries(
-      client,
-      groups.flatMap((group) => group.targets),
-      resolved.date
-    );
+    const [series, hourly] = await Promise.all([
+      readIndicatorSeries(
+        client,
+        groups.flatMap((group) => group.targets),
+        resolved.date
+      ),
+      readLaunchpadHourly(client, now),
+    ]);
     let cursor = 0;
     const view: LaunchpadIndicatorGroup[] = groups.map((group) => {
       const platforms = group.slugs.map((slug) => {
@@ -393,7 +412,7 @@ async function handleRequest(
       });
       return { indicator: group.indicator, unit: group.unit, platforms };
     });
-    sendHtml(res, 200, renderLaunchpads(view));
+    sendHtml(res, 200, renderLaunchpads(view, hourly, resolved.date));
     return;
   }
 
