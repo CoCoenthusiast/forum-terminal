@@ -7,6 +7,7 @@ export const HOURLY_STALE_HOURS = 3;
 const HOURLY_QUERY_LIMIT = 500;
 const LATEST_PRICE_QUERY_LIMIT = 500;
 const DAILY_QUERY_LIMIT = 500;
+const COINALYZE_HOURLY_QUERY_LIMIT = 500;
 
 type HourlyClient = Pick<PrismaClient, 'metricSnapshot'>;
 type LatestPriceClient = Pick<PrismaClient, 'marketSnapshot'>;
@@ -41,6 +42,15 @@ export interface HourlyMetricValue {
   stale: boolean;
 }
 
+export interface CoinalyzeHourlyValue {
+  scope: string;
+  metric: string;
+  value: number | null;
+  unit: string | null;
+  sourceTs: Date | null;
+  stale: boolean;
+}
+
 const OVERVIEW_SOLANA_INDICATORS = [
   'tvl_usd',
   'stablecoin_supply_usd',
@@ -48,6 +58,17 @@ const OVERVIEW_SOLANA_INDICATORS = [
 ];
 
 const OVERVIEW_GLOBAL_INDICATORS = ['global_market_cap_usd', 'btc_dominance_pct'];
+
+export const COINALYZE_HOURLY_WINDOW_HOURS = 8;
+export const COINALYZE_LEVERAGE_COINS = ['SOL', 'BTC', 'ETH'] as const;
+export const COINALYZE_LEVERAGE_METRICS = [
+  'oi_usd_close_1h',
+  'funding_rate_close_pct_1h',
+  'long_short_ratio_1h',
+  'long_account_pct_1h',
+  'liq_long_usd_1h',
+  'liq_short_usd_1h',
+] as const;
 
 export const HYPERLIQUID_COINS = ['SOL', 'BTC', 'ETH'];
 export const HYPERLIQUID_INDICATORS = [
@@ -90,6 +111,15 @@ interface MetricSnapshotRow {
   metric: string;
   value: unknown;
   unit: string | null;
+  collectedAt: Date;
+}
+
+interface CoinalyzeMetricSnapshotRow {
+  scope: string;
+  metric: string;
+  value: unknown;
+  unit: string | null;
+  sourceTs: Date | null;
   collectedAt: Date;
 }
 
@@ -229,6 +259,84 @@ export async function readLaunchpadHourly(
     now
   );
   return valuesFor(latest, scopes, HOURLY_LAUNCHPAD_INDICATORS, now);
+}
+
+async function latestCoinalyzeMetrics(
+  client: HourlyClient,
+  now: Date
+): Promise<Map<string, CoinalyzeMetricSnapshotRow>> {
+  const since = new Date(now.getTime() - COINALYZE_HOURLY_WINDOW_HOURS * HOUR_MS);
+  const closedBefore = new Date(now.getTime() - HOUR_MS);
+  const rows = await client.metricSnapshot.findMany({
+    where: {
+      scope: { startsWith: 'coinalyze:' },
+      metric: { endsWith: '_1h' },
+      sourceTs: { gte: since, lte: closedBefore },
+    },
+    orderBy: [{ sourceTs: 'desc' }, { collectedAt: 'desc' }],
+    take: COINALYZE_HOURLY_QUERY_LIMIT,
+    select: {
+      scope: true,
+      metric: true,
+      value: true,
+      unit: true,
+      sourceTs: true,
+      collectedAt: true,
+    },
+  });
+
+  const latest = new Map<string, CoinalyzeMetricSnapshotRow>();
+  for (const row of rows) {
+    if (row.sourceTs === null) continue;
+    const key = metricKey(row.scope, row.metric);
+    const current = latest.get(key);
+    if (
+      current === undefined ||
+      current.sourceTs === null ||
+      row.sourceTs.getTime() > current.sourceTs.getTime() ||
+      (row.sourceTs.getTime() === current.sourceTs.getTime() &&
+        row.collectedAt.getTime() > current.collectedAt.getTime())
+    ) {
+      latest.set(key, row);
+    }
+  }
+  return latest;
+}
+
+function coinalyzeCandleIsStale(now: Date, sourceTs: Date | null): boolean {
+  if (sourceTs === null) return false;
+  const candleEnd = sourceTs.getTime() + HOUR_MS;
+  return now.getTime() - candleEnd > HOURLY_STALE_HOURS * HOUR_MS;
+}
+
+function buildCoinalyzeValue(
+  scope: string,
+  metric: string,
+  row: CoinalyzeMetricSnapshotRow | undefined,
+  now: Date
+): CoinalyzeHourlyValue {
+  const sourceTs = row?.sourceTs ?? null;
+  return {
+    scope,
+    metric,
+    value: row === undefined ? null : toNumber(row.value),
+    unit: row?.unit ?? null,
+    sourceTs,
+    stale: coinalyzeCandleIsStale(now, sourceTs),
+  };
+}
+
+export async function readCoinalyzeLeverageHourly(
+  client: HourlyClient,
+  now: Date = new Date()
+): Promise<CoinalyzeHourlyValue[]> {
+  const scopes = COINALYZE_LEVERAGE_COINS.map((coin) => `coinalyze:${coin}`);
+  const latest = await latestCoinalyzeMetrics(client, now);
+  return scopes.flatMap((scope) =>
+    COINALYZE_LEVERAGE_METRICS.map((metric) =>
+      buildCoinalyzeValue(scope, metric, latest.get(metricKey(scope, metric)), now)
+    )
+  );
 }
 
 export async function readLatestPrices(

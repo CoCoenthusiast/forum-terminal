@@ -28,6 +28,7 @@ import {
 } from '../indicators/launchpads';
 import { readIndicatorSeries, type SeriesTarget } from './series-reader';
 import {
+  readCoinalyzeLeverageHourly,
   readHyperliquidDaily,
   readHyperliquidHourly,
   readLaunchpadHourly,
@@ -365,10 +366,16 @@ async function handleRequest(
     }
     const client = await resolveClient();
     const { leverage, macro } = leverageMacroTargets();
-    const [series, hyperliquidHourly, hyperliquidDaily] = await Promise.all([
+    const [
+      series,
+      hyperliquidHourly,
+      hyperliquidDaily,
+      coinalyzeHourly,
+    ] = await Promise.all([
       readIndicatorSeries(client, [...leverage, ...macro], resolved.date),
       readHyperliquidHourly(client, now),
       readHyperliquidDaily(client, resolved.date),
+      readCoinalyzeLeverageHourly(client, now),
     ]);
     sendHtml(
       res,
@@ -378,7 +385,8 @@ async function handleRequest(
         series.slice(leverage.length),
         hyperliquidHourly,
         hyperliquidDaily,
-        resolved.date
+        resolved.date,
+        coinalyzeHourly
       )
     );
     return;

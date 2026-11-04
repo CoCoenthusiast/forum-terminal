@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDashboardServer, HOST } from './server';
 import {
+  COINALYZE_HOURLY_NOTICE,
   DASHBOARD_FOOTER,
   INTEGRATED_NOTICE,
   renderDataHealth,
@@ -23,8 +24,11 @@ import {
 } from './charts';
 import type { IndicatorSeries } from './series-reader';
 import {
+  COINALYZE_HOURLY_WINDOW_HOURS,
+  COINALYZE_LEVERAGE_METRICS,
   HOURLY_STALE_HOURS,
   HOURLY_WINDOW_HOURS,
+  readCoinalyzeLeverageHourly,
   readHyperliquidDaily,
   readHyperliquidHourly,
   readLaunchpadHourly,
@@ -513,6 +517,276 @@ async function main(): Promise<void> {
   check(
     'hyperliquid values stay raw',
     hyperPage.includes('0.0001 FRACTION') && !hyperPage.includes('0.01%')
+  );
+
+  interface CoinalyzeHourlyQuery {
+    where?: {
+      scope?: { startsWith?: string };
+      metric?: { endsWith?: string };
+      sourceTs?: { gte?: Date; lte?: Date };
+    };
+    orderBy?: { sourceTs?: 'desc'; collectedAt?: 'desc' }[];
+    take?: number;
+  }
+
+  const coinalyzeNow = new Date('2026-11-02T15:05:00.000Z');
+  const coinalyzeRecentAt = new Date('2026-11-02T14:00:00.000Z');
+  const coinalyzeOlderAt = new Date('2026-11-02T13:00:00.000Z');
+  const coinalyzeRows = [
+    {
+      scope: 'coinalyze:SOL',
+      metric: 'oi_usd_close_1h',
+      value: 900,
+      unit: 'USD',
+      sourceTs: coinalyzeOlderAt,
+      collectedAt: coinalyzeNow,
+    },
+    {
+      scope: 'coinalyze:SOL',
+      metric: 'oi_usd_close_1h',
+      value: 1000,
+      unit: 'USD',
+      sourceTs: coinalyzeRecentAt,
+      collectedAt: coinalyzeNow,
+    },
+    {
+      scope: 'coinalyze:SOL',
+      metric: 'funding_rate_close_pct_1h',
+      value: 0.01,
+      unit: 'PERCENT',
+      sourceTs: coinalyzeRecentAt,
+      collectedAt: coinalyzeNow,
+    },
+    {
+      scope: 'coinalyze:SOL',
+      metric: 'long_short_ratio_1h',
+      value: 1.2,
+      unit: 'RATIO',
+      sourceTs: coinalyzeRecentAt,
+      collectedAt: coinalyzeNow,
+    },
+    {
+      scope: 'coinalyze:SOL',
+      metric: 'long_account_pct_1h',
+      value: 55,
+      unit: 'PERCENT',
+      sourceTs: coinalyzeRecentAt,
+      collectedAt: coinalyzeNow,
+    },
+    {
+      scope: 'coinalyze:SOL',
+      metric: 'liq_long_usd_1h',
+      value: 0,
+      unit: 'USD',
+      sourceTs: coinalyzeRecentAt,
+      collectedAt: coinalyzeNow,
+    },
+    {
+      scope: 'coinalyze:SOL',
+      metric: 'liq_short_usd_1h',
+      value: 5,
+      unit: 'USD',
+      sourceTs: coinalyzeRecentAt,
+      collectedAt: coinalyzeNow,
+    },
+    {
+      scope: 'coinalyze:BTC',
+      metric: 'oi_usd_close_1h',
+      value: 2000,
+      unit: 'USD',
+      sourceTs: coinalyzeRecentAt,
+      collectedAt: coinalyzeNow,
+    },
+  ];
+  const coinalyzeQueries: CoinalyzeHourlyQuery[] = [];
+  const coinalyzeClient = {
+    metricSnapshot: {
+      findMany: async (args: CoinalyzeHourlyQuery) => {
+        coinalyzeQueries.push(args);
+        return coinalyzeRows;
+      },
+    },
+  };
+  const coinalyzeHourly = await readCoinalyzeLeverageHourly(
+    coinalyzeClient as never,
+    coinalyzeNow
+  );
+  const coinalyzeQuery = coinalyzeQueries[0];
+  check(
+    'coinalyze hourly covers 3 coins x 6 metrics',
+    coinalyzeHourly.length === 18
+  );
+  check(
+    'coinalyze hourly query filters by scope, metric and closed window',
+    coinalyzeQuery?.where?.scope?.startsWith === 'coinalyze:' &&
+      coinalyzeQuery?.where?.metric?.endsWith === '_1h' &&
+      coinalyzeQuery?.where?.sourceTs?.gte?.toISOString() ===
+        new Date(
+          coinalyzeNow.getTime() -
+            COINALYZE_HOURLY_WINDOW_HOURS * 60 * 60 * 1000
+        ).toISOString() &&
+      coinalyzeQuery?.where?.sourceTs?.lte?.toISOString() ===
+        new Date(coinalyzeNow.getTime() - 60 * 60 * 1000).toISOString() &&
+      (coinalyzeQuery?.take ?? 0) > 0
+  );
+  check(
+    'coinalyze hourly query orders by newest candle',
+    coinalyzeQuery?.orderBy?.[0]?.sourceTs === 'desc' &&
+      coinalyzeQuery?.orderBy?.[1]?.collectedAt === 'desc'
+  );
+  const solOi = coinalyzeHourly.find(
+    (row) =>
+      row.scope === 'coinalyze:SOL' && row.metric === 'oi_usd_close_1h'
+  );
+  check(
+    'coinalyze picks the newest candle per scope and metric',
+    solOi?.value === 1000 &&
+      solOi.sourceTs?.toISOString() === coinalyzeRecentAt.toISOString() &&
+      solOi.stale === false
+  );
+  const coinalyzePresent = new Set(
+    coinalyzeRows.map((row) => `${row.scope}\u0000${row.metric}`)
+  ).size;
+  check(
+    'coinalyze missing coins and metrics are n/a',
+    coinalyzeHourly.filter((row) => row.value === null).length ===
+      18 - coinalyzePresent &&
+      coinalyzeHourly.find(
+        (row) =>
+          row.scope === 'coinalyze:ETH' && row.metric === 'oi_usd_close_1h'
+      )?.value === null
+  );
+  const coinalyzePage = renderLeverageMacro(
+    [],
+    [],
+    [],
+    [],
+    '2026-11-01',
+    coinalyzeHourly
+  );
+  check(
+    'leverage & macro shows the latest closed Coinalyze hour',
+    coinalyzePage.includes('<h3>Latest closed hour</h3>') &&
+      coinalyzePage.includes(COINALYZE_HOURLY_NOTICE) &&
+      coinalyzePage.includes('hour 14:00 to 15:00 UTC') &&
+      coinalyzePage.includes('1,000 USD') &&
+      coinalyzePage.includes('2,000 USD')
+  );
+  check(
+    'coinalyze zero liquidation is a real zero',
+    coinalyzeHourly.find(
+      (row) =>
+        row.scope === 'coinalyze:SOL' &&
+        row.metric === 'liq_long_usd_1h'
+    )?.value === 0 && coinalyzePage.includes('0 USD')
+  );
+  check(
+    'leverage & macro keeps the Coinalyze credit link',
+    coinalyzePage.includes(
+      '<a href="https://coinalyze.net">https://coinalyze.net</a>'
+    )
+  );
+
+  const staleCoinalyzeAt = new Date('2026-11-02T10:00:00.000Z');
+  const staleCoinalyzeClient = {
+    metricSnapshot: {
+      findMany: async () => [
+        {
+          scope: 'coinalyze:SOL',
+          metric: 'oi_usd_close_1h',
+          value: 1100,
+          unit: 'USD',
+          sourceTs: staleCoinalyzeAt,
+          collectedAt: coinalyzeNow,
+        },
+      ],
+    },
+  };
+  const staleCoinalyze = await readCoinalyzeLeverageHourly(
+    staleCoinalyzeClient as never,
+    coinalyzeNow
+  );
+  const staleSolOi = staleCoinalyze.find(
+    (row) =>
+      row.scope === 'coinalyze:SOL' && row.metric === 'oi_usd_close_1h'
+  );
+  check(
+    'coinalyze marks a candle ending more than 3h ago as stale',
+    staleSolOi?.stale === true &&
+      staleCoinalyze.filter((row) => row.stale).length === 1
+  );
+  const staleCoinalyzePage = renderLeverageMacro(
+    [],
+    [],
+    [],
+    [],
+    '2026-11-01',
+    staleCoinalyze
+  );
+  check(
+    'leverage & macro shows stale next to the Coinalyze value',
+    staleCoinalyzePage.includes(
+      '1,100 USD <span class="warn">stale</span>'
+    ) && staleCoinalyzePage.includes('hour 10:00 to 11:00 UTC')
+  );
+
+  const emptyCoinalyzeClient = {
+    metricSnapshot: { findMany: async () => [] },
+  };
+  const emptyCoinalyze = await readCoinalyzeLeverageHourly(
+    emptyCoinalyzeClient as never,
+    coinalyzeNow
+  );
+  check(
+    'coinalyze with no rows is n/a, not zero',
+    emptyCoinalyze.length === 18 &&
+      emptyCoinalyze.every(
+        (row) =>
+          row.value === null && row.sourceTs === null && row.stale === false
+      )
+  );
+  const emptyCoinalyzePage = renderLeverageMacro(
+    [],
+    [],
+    [],
+    [],
+    '2026-11-01',
+    emptyCoinalyze
+  );
+  check(
+    'leverage & macro renders n/a for missing Coinalyze hours',
+    emptyCoinalyzePage.includes('<h3>Latest closed hour</h3>') &&
+      emptyCoinalyzePage.includes('<td>n/a</td>') &&
+      !emptyCoinalyzePage.includes('0 USD')
+  );
+
+  const missingCoinalyzeClient = {
+    metricSnapshot: {
+      findMany: async () =>
+        coinalyzeRows.filter(
+          (row) =>
+            !(
+              row.scope === 'coinalyze:SOL' &&
+              row.metric === 'funding_rate_close_pct_1h'
+            )
+        ),
+    },
+  };
+  const missingCoinalyze = await readCoinalyzeLeverageHourly(
+    missingCoinalyzeClient as never,
+    coinalyzeNow
+  );
+  const missingFunding = missingCoinalyze.find(
+    (row) =>
+      row.scope === 'coinalyze:SOL' &&
+      row.metric === 'funding_rate_close_pct_1h'
+  );
+  check(
+    'coinalyze missing metric is n/a',
+    missingFunding?.value === null &&
+      missingFunding.sourceTs === null &&
+      missingFunding.stale === false &&
+      COINALYZE_LEVERAGE_METRICS.includes('funding_rate_close_pct_1h')
   );
 
   const launchHourlyRows = [

@@ -11,9 +11,12 @@ import {
 import type { IndicatorSeries } from './series-reader';
 import { escapeHtml, sanitizeHtml, sanitizeText } from './sanitize';
 import {
+  COINALYZE_LEVERAGE_COINS,
+  COINALYZE_LEVERAGE_METRICS,
   HOURLY_LAUNCHPAD_SLUGS,
   HYPERLIQUID_COINS,
   HYPERLIQUID_INDICATORS,
+  type CoinalyzeHourlyValue,
   type DailyMetricValue,
   type HourlyMetricValue,
   type LatestPriceValue,
@@ -26,6 +29,10 @@ export const DASHBOARD_FOOTER =
 export const INTEGRATED_NOTICE =
   'Latest = rolling hourly capture. Closed = daily series. Not comparable.';
 
+export const COINALYZE_HOURLY_NOTICE =
+  'Hourly closed candles from Coinalyze. Not comparable with the daily indicators.';
+
+const HOUR_MS = 60 * 60 * 1000;
 const PRICE_ORDER = ['SOL', 'BTC', 'ETH'] as const;
 
 const USD_FORMATTER = new Intl.NumberFormat('en-US', {
@@ -89,6 +96,14 @@ function formatClosedDate(asOf: Date | null): string {
   return asOf === null ? 'n/a' : asOf.toISOString().slice(0, 10);
 }
 
+function formatCandleWindow(sourceTs: Date | null): string {
+  if (sourceTs === null) return 'n/a';
+  const end = new Date(sourceTs.getTime() + HOUR_MS);
+  return `hour ${sourceTs.toISOString().slice(11, 16)} to ${end
+    .toISOString()
+    .slice(11, 16)} UTC`;
+}
+
 function ageCell(ageMs: number | null, stale: boolean): string {
   const age = formatHourlyAge(ageMs);
   if (age === 'n/a') return 'n/a';
@@ -113,6 +128,15 @@ const ACTIVITY_LABELS: Record<string, string> = {
   dex_volume_24h_usd: 'DEX volume 24h',
   global_market_cap_usd: 'Global market cap',
   btc_dominance_pct: 'BTC dominance',
+};
+
+const COINALYZE_METRIC_LABELS: Record<string, string> = {
+  oi_usd_close_1h: 'OI USD',
+  funding_rate_close_pct_1h: 'Funding rate %',
+  long_short_ratio_1h: 'Long/short ratio',
+  long_account_pct_1h: 'Long account %',
+  liq_long_usd_1h: 'Long liq. USD',
+  liq_short_usd_1h: 'Short liq. USD',
 };
 
 function latestPriceLabel(asset: string): string {
@@ -410,6 +434,37 @@ ${renderLineChart(series)}
 </article>`;
 }
 
+function coinalyzeMetricLabel(metric: string): string {
+  return COINALYZE_METRIC_LABELS[metric] ?? metric;
+}
+
+function coinalyzeValueCell(row: CoinalyzeHourlyValue | undefined): string {
+  if (row === undefined || row.value === null) return 'n/a';
+  const value = escapeHtml(formatHourlyValue(row.value, row.unit));
+  return row.stale ? `${value} <span class="warn">stale</span>` : value;
+}
+
+function coinalyzeHourlyRows(
+  rows: readonly CoinalyzeHourlyValue[]
+): string {
+  return COINALYZE_LEVERAGE_COINS.map((coin) => {
+    const scope = `coinalyze:${coin}`;
+    const values = COINALYZE_LEVERAGE_METRICS.map((metric) =>
+      rows.find((row) => row.scope === scope && row.metric === metric)
+    );
+    const latestSourceTs =
+      values
+        .map((row) => row?.sourceTs ?? null)
+        .filter((sourceTs): sourceTs is Date => sourceTs !== null)
+        .sort((left, right) => right.getTime() - left.getTime())[0] ?? null;
+    return `<tr><th scope="row">${escapeHtml(coin)}</th><td>${escapeHtml(
+      formatCandleWindow(latestSourceTs)
+    )}</td>${values
+      .map((row) => `<td>${coinalyzeValueCell(row)}</td>`)
+      .join('')}</tr>`;
+  }).join('');
+}
+
 function hyperliquidRows(
   hourly: readonly HourlyMetricValue[],
   daily: readonly DailyMetricValue[]
@@ -433,7 +488,8 @@ export function renderLeverageMacro(
   macro: readonly IndicatorSeries[],
   hyperliquidHourly: readonly HourlyMetricValue[] = [],
   hyperliquidDaily: readonly DailyMetricValue[] = [],
-  asOf = 'n/a'
+  asOf = 'n/a',
+  coinalyzeHourly: readonly CoinalyzeHourlyValue[] = []
 ): string {
   const leverageCharts =
     leverage.length === 0 ? '<p>n/a</p>' : leverage.map(chartArticle).join('\n');
@@ -448,6 +504,15 @@ export function renderLeverageMacro(
 <h2>Leverage, SOL (Coinalyze)</h2>
 <p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
 ${leverageCharts}
+<h3>Latest closed hour</h3>
+<p class="notice">${escapeHtml(COINALYZE_HOURLY_NOTICE)}</p>
+<p class="muted">Data: Coinalyze (<a href="https://coinalyze.net">https://coinalyze.net</a>)</p>
+<div class="table-scroll"><table>
+<thead><tr><th>Coin</th><th>Latest closed hour</th>${COINALYZE_LEVERAGE_METRICS.map(
+  (metric) => `<th>${escapeHtml(coinalyzeMetricLabel(metric))}</th>`
+).join('')}</tr></thead>
+<tbody>${coinalyzeHourlyRows(coinalyzeHourly)}</tbody>
+</table></div>
 </section>
 <section>
 <h2>Macro (US)</h2>
