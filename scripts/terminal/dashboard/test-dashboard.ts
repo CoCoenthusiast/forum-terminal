@@ -5,6 +5,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDashboardServer, HOST } from './server';
 import {
+  createDashboardAdapter,
+  getDashboardPrisma,
+} from './db-readonly';
+import {
   COINALYZE_HOURLY_NOTICE,
   DASHBOARD_FOOTER,
   DOLLAR_PROXY_NOTICE,
@@ -177,6 +181,38 @@ function requestStatus(port: number, method: string, path: string): Promise<Stat
 }
 
 async function main(): Promise<void> {
+  const dashboardEnvKey = 'DASHBOARD_DATABASE_URL';
+  const terminalEnvKey = ['TERMINAL', 'DATABASE', 'URL'].join('_');
+  const dbImportPath = ['..', 'db'].join('/');
+  const savedDashboardUrl = process.env[dashboardEnvKey];
+  const savedTerminalUrl = process.env[terminalEnvKey];
+  delete process.env[dashboardEnvKey];
+  process.env[terminalEnvKey] = 'postgresql://sentinel:secret@127.0.0.1:5432/sentinel';
+
+  try {
+    getDashboardPrisma();
+    check('dashboard fails without DASHBOARD_DATABASE_URL', false);
+  } catch (error) {
+    check(
+      'dashboard fails without DASHBOARD_DATABASE_URL',
+      error instanceof Error && error.message === 'Missing DASHBOARD_DATABASE_URL'
+    );
+  }
+
+  if (savedDashboardUrl === undefined) delete process.env[dashboardEnvKey];
+  else process.env[dashboardEnvKey] = savedDashboardUrl;
+  if (savedTerminalUrl === undefined) delete process.env[terminalEnvKey];
+  else process.env[terminalEnvKey] = savedTerminalUrl;
+
+  const adapter = createDashboardAdapter(
+    'postgresql://user:pass@127.0.0.1:5432/dashboard_test'
+  );
+  const adapterConfig = (adapter as unknown as { config?: { max?: number } }).config;
+  check(
+    'dashboard database pool is limited to 3 connections',
+    adapterConfig?.max === 3
+  );
+
   const server = createDashboardServer();
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -2222,6 +2258,21 @@ async function main(): Promise<void> {
   for (const file of sources) {
     const source = readFileSync(join(directory, file), 'utf8');
     check(`${file} has no write operations`, !writePattern.test(source));
+  }
+
+  const allSources = readdirSync(directory).filter((file) => file.endsWith('.ts'));
+  for (const file of allSources) {
+    const source = readFileSync(join(directory, file), 'utf8');
+    const mentionsTerminalUrl = source.includes(terminalEnvKey);
+    const importsDb =
+      source.includes(`from '${dbImportPath}'`) ||
+      source.includes(`from "${dbImportPath}"`) ||
+      source.includes(`import('${dbImportPath}')`) ||
+      source.includes(`import("${dbImportPath}")`);
+    check(
+      `${file} does not reference the terminal database URL or import ../db`,
+      !mentionsTerminalUrl && !importsDb
+    );
   }
 
   console.log(`\n=== RESULTADO: ${passed} passaram, ${failures} falharam ===`);

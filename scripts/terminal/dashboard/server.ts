@@ -5,7 +5,6 @@ import {
   LAUNCHPAD_SLUGS,
   STATE_VERSION,
   buildProtocolScope,
-  checkEnvironment,
 } from '../config';
 import type { PrismaClient } from '../generated/db/client';
 import {
@@ -50,6 +49,7 @@ import {
   type LaunchpadIndicatorGroup,
 } from './pages';
 import { readTokenDetail, readTokenSummaries } from './token-reader';
+import { checkDashboardEnvironment, getDashboardPrisma } from './db-readonly';
 
 export const HOST = '127.0.0.1';
 export const DEFAULT_PORT = 3000;
@@ -72,7 +72,7 @@ let clientPromise: Promise<DashboardClient> | null = null;
 
 async function getClient(): Promise<DashboardClient> {
   if (clientPromise === null) {
-    clientPromise = import('../db').then((module) => module.prisma);
+    clientPromise = Promise.resolve(getDashboardPrisma());
   }
   return clientPromise;
 }
@@ -506,7 +506,7 @@ export function parsePort(value: string | undefined): number {
 }
 
 async function main(): Promise<void> {
-  checkEnvironment();
+  checkDashboardEnvironment();
   const port = parsePort(process.env.PORT);
   const server = createDashboardServer();
 
