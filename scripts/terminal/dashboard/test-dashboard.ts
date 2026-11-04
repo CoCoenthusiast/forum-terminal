@@ -10,6 +10,7 @@ import {
   DOLLAR_PROXY_NOTICE,
   INTEGRATED_NOTICE,
   ROLLING_HOURLY_NOTICE,
+  SINCE_LAST_CLOSE_NOTICE,
   renderDataHealth,
   renderLaunchpads,
   renderLeverageMacro,
@@ -64,6 +65,10 @@ function check(name: string, ok: boolean, extra = ''): void {
 
 function metric(value: number | null): RecapMetric {
   return { value, unit: null, asOf: null, dataAsOf: null };
+}
+
+function metricAt(value: number | null, date: string | null): RecapMetric {
+  return { value, unit: null, asOf: date, dataAsOf: date };
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -1200,6 +1205,112 @@ async function main(): Promise<void> {
     historyPage.includes('$100.00') &&
       !historyPage.includes('$999.00') &&
       !historyPage.includes('coingecko_history')
+  );
+
+  const sinceCloseInput = emptyInput();
+  sinceCloseInput.prices = [
+    {
+      asset: 'SOL',
+      priceUsd: metricAt(150, '2026-11-01'),
+      return1d: metric(null),
+      return7d: metric(null),
+    },
+    {
+      asset: 'BTC',
+      priceUsd: metricAt(60000, '2026-11-01'),
+      return1d: metric(null),
+      return7d: metric(null),
+    },
+    {
+      asset: 'ETH',
+      priceUsd: metricAt(3000, '2026-11-01'),
+      return1d: metric(null),
+      return7d: metric(null),
+    },
+  ];
+  const sinceCloseRows = [
+    {
+      asset: 'solana',
+      priceUsd: 160,
+      collectedAt: recentAt,
+      source: { provider: 'coingecko' },
+    },
+    {
+      asset: 'bitcoin',
+      priceUsd: 66000,
+      collectedAt: recentAt,
+      source: { provider: 'coingecko' },
+    },
+    {
+      asset: 'ethereum',
+      priceUsd: 3000,
+      collectedAt: recentAt,
+      source: { provider: 'coingecko' },
+    },
+  ];
+  const sinceCloseLatest = await readLatestPrices(
+    {
+      marketSnapshot: { findMany: async () => sinceCloseRows },
+    } as never,
+    hourlyNow
+  );
+  const sinceClosePage = renderOverview(
+    sinceCloseInput,
+    [],
+    sinceCloseLatest
+  );
+  check(
+    'since last close has the fixed raw-numbers notice',
+    sinceClosePage.includes(SINCE_LAST_CLOSE_NOTICE) &&
+      sinceClosePage.includes(
+        'Since last close (raw numbers, not part of the closed state)'
+      )
+  );
+  check(
+    'since last close shows closed, latest and change for SOL',
+    sinceClosePage.includes(
+      '<tr><th scope="row">SOL</th><td>$150.00<br><span class="muted">closed value of 2026-11-01</span></td><td>$160.00<br><span class="muted">latest 2026-11-02 11:00 UTC</span></td><td>+6.67%</td></tr>'
+    )
+  );
+  check(
+    'since last close computes the SOL/BTC ratio change',
+    sinceClosePage.includes(
+      '<tr><th scope="row">SOL/BTC</th><td>0.0025<br><span class="muted">closed value of 2026-11-01</span></td><td>0.002424<br><span class="muted">latest 2026-11-02 11:00 UTC</span></td><td>-3.03%</td></tr>'
+    )
+  );
+  check(
+    'since last close computes the SOL/ETH ratio change',
+    sinceClosePage.includes('SOL/ETH') &&
+      sinceClosePage.includes('0.053333') &&
+      sinceClosePage.includes('+6.67%')
+  );
+
+  const missingClosePage = renderOverview(emptyInput(), [], latestPrices);
+  check(
+    'since last close renders n/a when the close is missing',
+    missingClosePage.includes(
+      '<tr><th scope="row">SOL</th><td>n/a</td><td>$150.00<br><span class="muted">latest 2026-11-02 11:00 UTC</span></td><td>n/a</td></tr>'
+    )
+  );
+  const missingLatestPage = renderOverview(sinceCloseInput, [], noPrices);
+  check(
+    'since last close renders n/a when the latest hourly price is missing, never zero',
+    missingLatestPage.includes(
+      '<tr><th scope="row">SOL</th><td>$150.00<br><span class="muted">closed value of 2026-11-01</span></td><td>n/a</td><td>n/a</td></tr>'
+    ) && !missingLatestPage.includes('$0.00')
+  );
+  const staleSinceClosePage = renderOverview(
+    sinceCloseInput,
+    [],
+    stalePrices
+  );
+  const staleSinceCloseBlock = staleSinceClosePage.slice(
+    staleSinceClosePage.indexOf('Since last close')
+  );
+  check(
+    'since last close marks a price older than 3h as stale',
+    staleSinceCloseBlock.includes('$99.00') &&
+      staleSinceCloseBlock.includes('stale')
   );
 
   const sharePage = renderLaunchpads([

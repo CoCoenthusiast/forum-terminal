@@ -43,6 +43,9 @@ export const ROLLING_HOURLY_NOTICE = `Rolling 24h captures, formula ${ROLLING_FO
 export const DOLLAR_PROXY_NOTICE =
   'EUR/USD is a proxy, shown separately. It is not the Fed broad dollar index and is never combined with it.';
 
+export const SINCE_LAST_CLOSE_NOTICE =
+  'Raw intraday movement since the last closed day. The state and regime above are computed on closed days only and are not recomputed.';
+
 const HOUR_MS = 60 * 60 * 1000;
 const PRICE_ORDER = ['SOL', 'BTC', 'ETH'] as const;
 
@@ -330,6 +333,126 @@ function regimeText(input: RecapInput): string {
   return label;
 }
 
+interface SinceLastCloseRow {
+  label: string;
+  kind: 'price' | 'ratio';
+  closeValue: number | null;
+  closeDate: string | null;
+  latestValue: number | null;
+  latestDate: Date | null;
+  stale: boolean;
+  changePct: number | null;
+}
+
+function finiteNumber(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function percentChange(
+  latest: number | null,
+  close: number | null
+): number | null {
+  if (latest === null || close === null || close === 0) return null;
+  return ((latest - close) / close) * 100;
+}
+
+function formatChangePct(value: number | null): string {
+  if (value === null) return 'n/a';
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
+}
+
+function olderDate(left: Date | null, right: Date | null): Date | null {
+  if (left === null || right === null) return null;
+  return left.getTime() <= right.getTime() ? left : right;
+}
+
+function ratioValue(
+  first: number | null,
+  second: number | null
+): number | null {
+  if (first === null || second === null || second === 0) return null;
+  return first / second;
+}
+
+function sinceLastCloseRows(
+  input: RecapInput,
+  latestPrices: readonly LatestPriceValue[],
+  asOf: string
+): string {
+  const assets = PRICE_ORDER.map((asset) => {
+    const close = input.prices.find(
+      (item) => item.asset.toUpperCase() === asset
+    )?.priceUsd;
+    const closeValue = finiteNumber(close?.value);
+    const latest = latestPrices.find(
+      (row) => row.asset === PRICE_ASSET_BY_LABEL[asset]
+    );
+    const latestValue = finiteNumber(latest?.priceUsd);
+    return {
+      label: asset,
+      kind: 'price' as const,
+      closeValue,
+      closeDate: metricDate(close),
+      latestValue,
+      latestDate: latest?.collectedAt ?? null,
+      stale: latest?.stale ?? false,
+      changePct: percentChange(latestValue, closeValue),
+    };
+  });
+  const byLabel = new Map<string, (typeof assets)[number]>(
+    assets.map((row) => [row.label, row])
+  );
+  const ratio = (first: string, second: string): SinceLastCloseRow => {
+    const left = byLabel.get(first);
+    const right = byLabel.get(second);
+    const closeValue = ratioValue(
+      left?.closeValue ?? null,
+      right?.closeValue ?? null
+    );
+    const latestValue = ratioValue(
+      left?.latestValue ?? null,
+      right?.latestValue ?? null
+    );
+    return {
+      label: `${first}/${second}`,
+      kind: 'ratio',
+      closeValue,
+      closeDate: asOf,
+      latestValue,
+      latestDate: olderDate(
+        left?.latestDate ?? null,
+        right?.latestDate ?? null
+      ),
+      stale: (left?.stale ?? false) || (right?.stale ?? false),
+      changePct: percentChange(latestValue, closeValue),
+    };
+  };
+
+  return [...assets, ratio('SOL', 'BTC'), ratio('SOL', 'ETH')]
+    .map((row) => {
+      const formatValue =
+        row.kind === 'price'
+          ? (value: number): string => USD_FORMATTER.format(value)
+          : (value: number): string => HOURLY_VALUE_FORMATTER.format(value);
+      const closed =
+        row.closeValue === null
+          ? 'n/a'
+          : `${escapeHtml(formatValue(row.closeValue))}<br><span class="muted">closed value of ${escapeHtml(
+              row.closeDate ?? 'n/a'
+            )}</span>`;
+      const latest =
+        row.latestDate === null
+          ? 'n/a'
+          : `${row.latestValue === null ? 'n/a' : escapeHtml(formatValue(row.latestValue))}<br><span class="muted">latest ${escapeHtml(
+              formatHourlyUtc(row.latestDate)
+            )}</span>${row.stale ? ' <span class="warn">stale</span>' : ''}`;
+      return `<tr><th scope="row">${escapeHtml(row.label)}</th><td>${closed}</td><td>${latest}</td><td>${escapeHtml(
+        formatChangePct(row.changePct)
+      )}</td></tr>`;
+    })
+    .join('');
+}
+
 function blockDateRow(block: string, date: string | null, asOf: string): string {
   return `<tr><th scope="row">${escapeHtml(block)}</th><td>${escapeHtml(
     delayText(date, asOf)
@@ -468,6 +591,12 @@ export function renderOverview(
 <h2>Regime</h2>
 <p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
 <p>${escapeHtml(regimeText(input))}</p>
+<h3>Since last close (raw numbers, not part of the closed state)</h3>
+<p class="notice">${escapeHtml(SINCE_LAST_CLOSE_NOTICE)}</p>
+<table>
+<thead><tr><th>Series</th><th>Closed</th><th>Latest</th><th>Change</th></tr></thead>
+<tbody>${sinceLastCloseRows(input, latestPrices, asOf)}</tbody>
+</table>
 </section>
 <section>
 <h2>Data dates</h2>
