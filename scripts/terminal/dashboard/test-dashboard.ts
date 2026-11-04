@@ -7,6 +7,7 @@ import { createDashboardServer, HOST } from './server';
 import {
   COINALYZE_HOURLY_NOTICE,
   DASHBOARD_FOOTER,
+  DOLLAR_PROXY_NOTICE,
   INTEGRATED_NOTICE,
   ROLLING_HOURLY_NOTICE,
   renderDataHealth,
@@ -24,6 +25,7 @@ import {
   renderTimeLineChart,
 } from './charts';
 import type { IndicatorSeries } from './series-reader';
+import { MACRO_INDICATORS } from '../indicators/macro-catalog';
 import {
   COINALYZE_HOURLY_WINDOW_HOURS,
   COINALYZE_LEVERAGE_METRICS,
@@ -39,6 +41,7 @@ import {
   readRollingLaunchpadHourly,
   readRollingOverviewHourly,
 } from './hourly-reader';
+import { readDollarMacro } from './macro-reader';
 import {
   readTokenDetail,
   readTokenSummaries,
@@ -1263,6 +1266,209 @@ async function main(): Promise<void> {
   check(
     'a missing token capture splits the line into two segments',
     (timeGap.match(/class="chart-line"/g) ?? []).length === 2
+  );
+
+  interface DollarQuery {
+    where?: {
+      seriesId?: { in?: string[] };
+      status?: string;
+      value?: { not?: null };
+      refDate?: { gte?: Date; lte?: Date };
+    };
+    orderBy?: { refDate?: 'desc'; firstSeenAt?: 'desc' }[];
+    take?: number;
+  }
+
+  const dollarNow = new Date('2026-11-02T12:00:00.000Z');
+  const dollarRows = [
+    {
+      seriesId: 'fed_broad_dollar',
+      value: 121.5,
+      unit: 'INDEX_1973_100',
+      status: 'ok',
+      refDate: new Date('2026-10-28T00:00:00.000Z'),
+      firstSeenAt: new Date('2026-10-28T20:00:00.000Z'),
+    },
+    {
+      seriesId: 'fed_broad_dollar',
+      value: null,
+      unit: 'INDEX_1973_100',
+      status: 'nd',
+      refDate: new Date('2026-11-01T00:00:00.000Z'),
+      firstSeenAt: new Date('2026-11-01T20:00:00.000Z'),
+    },
+    {
+      seriesId: 'ecb_eurusd',
+      value: 1.0876,
+      unit: 'USD_PER_EUR',
+      status: 'ok',
+      refDate: new Date('2026-11-01T00:00:00.000Z'),
+      firstSeenAt: new Date('2026-11-01T16:00:00.000Z'),
+    },
+  ];
+  const dollarQueries: DollarQuery[] = [];
+  const dollarClient = {
+    macroObservation: {
+      findMany: async (args: DollarQuery) => {
+        dollarQueries.push(args);
+        return dollarRows;
+      },
+    },
+  };
+  const dollarMacro = await readDollarMacro(dollarClient as never, dollarNow);
+  const dollarQuery = dollarQueries[0];
+  check(
+    'macro chart list includes broad dollar and EUR/USD',
+    MACRO_INDICATORS.some(
+      (definition) => definition.indicator === 'macro_dollar_broad_change_5d_pct'
+    ) &&
+      MACRO_INDICATORS.some(
+        (definition) => definition.indicator === 'macro_eurusd_change_5d_pct'
+      )
+  );
+  const macroChartPage = renderLeverageMacro(
+    [],
+    [
+      emptySeries('macro_dollar_broad_change_5d_pct', 'macro', 'FRACTION'),
+      emptySeries('macro_eurusd_change_5d_pct', 'macro', 'FRACTION'),
+    ]
+  );
+  check(
+    'macro EUR/USD chart uses the proxy label without changing broad dollar',
+    macroChartPage.includes(
+      '<h3>macro_dollar_broad_change_5d_pct <span class="muted">n/a</span></h3>'
+    ) &&
+      macroChartPage.includes(
+        'EUR/USD 5d change (proxy, not the broad dollar index)'
+      )
+  );
+  check(
+    'macro EUR/USD chart without data is n/a',
+    macroChartPage.includes(
+      '<h3>EUR/USD 5d change (proxy, not the broad dollar index) <span class="muted">n/a</span></h3>'
+    )
+  );
+  check(
+    'dollar proxy notice is fixed',
+    DOLLAR_PROXY_NOTICE ===
+      'EUR/USD is a proxy, shown separately. It is not the Fed broad dollar index and is never combined with it.'
+  );
+  check(
+    'dollar macro reads Fed broad dollar and ECB EUR/USD',
+    dollarMacro.length === 2 &&
+      dollarMacro[0]?.seriesId === 'fed_broad_dollar' &&
+      dollarMacro[1]?.seriesId === 'ecb_eurusd'
+  );
+  check(
+    'dollar macro query uses ok rows, 30 days and a limit',
+    dollarQuery?.where?.seriesId?.in?.includes('fed_broad_dollar') === true &&
+      dollarQuery?.where?.seriesId?.in?.includes('ecb_eurusd') === true &&
+      dollarQuery?.where?.status === 'ok' &&
+      dollarQuery?.where?.value?.not === null &&
+      dollarQuery?.where?.refDate?.gte?.getTime() ===
+        dollarNow.getTime() - 30 * 24 * 60 * 60 * 1000 &&
+      dollarQuery?.where?.refDate?.lte?.getTime() === dollarNow.getTime() &&
+      (dollarQuery?.take ?? 0) > 0
+  );
+  const broadDollar = dollarMacro[0];
+  const eurUsd = dollarMacro[1];
+  check(
+    'Fed broad dollar keeps the 5-day delayed observation',
+    broadDollar?.value === 121.5 &&
+      broadDollar.refDate?.toISOString() === '2026-10-28T00:00:00.000Z' &&
+      broadDollar.firstSeenAt?.toISOString() === '2026-10-28T20:00:00.000Z' &&
+      broadDollar.ageDays === 5
+  );
+  check(
+    'a newer nd row is ignored for the broad dollar',
+    broadDollar?.refDate?.toISOString() === '2026-10-28T00:00:00.000Z'
+  );
+  check(
+    'ECB EUR/USD keeps the recent observation and age',
+    eurUsd?.value === 1.0876 &&
+      eurUsd.refDate?.toISOString() === '2026-11-01T00:00:00.000Z' &&
+      eurUsd.firstSeenAt?.toISOString() === '2026-11-01T16:00:00.000Z' &&
+      eurUsd.ageDays === 1
+  );
+  const dollarPage = renderLeverageMacro(
+    [],
+    [],
+    [],
+    [],
+    '2026-11-01',
+    [],
+    dollarMacro
+  );
+  check(
+    'leverage & macro shows the Dollar block at the top of macro',
+    dollarPage.includes('<h3>Dollar</h3>') &&
+      dollarPage.includes(DOLLAR_PROXY_NOTICE) &&
+      dollarPage.includes('Broad dollar index (Fed H.10)') &&
+      dollarPage.includes('EUR/USD (ECB reference rate), daily proxy')
+  );
+  check(
+    'Dollar block shows values, observation dates, ages and notes',
+    dollarPage.includes('121.5 <span class="muted">INDEX_1973_100</span>') &&
+      dollarPage.includes('1.0876 <span class="muted">USD_PER_EUR</span>') &&
+      dollarPage.includes('2026-10-28') &&
+      dollarPage.includes('5d old') &&
+      dollarPage.includes('2026-11-01') &&
+      dollarPage.includes('1d old') &&
+      dollarPage.includes('Weekly release (Mondays), 3 to 9 days behind') &&
+      dollarPage.includes(
+        'Measures only the euro against the dollar, not the broad dollar index'
+      )
+  );
+  check(
+    'Dollar block shows Fed and ECB source credits',
+    dollarPage.includes(
+      'Sources: Federal Reserve H.10; European Central Bank (ECB reference rates).'
+    )
+  );
+
+  const missingEurClient = {
+    macroObservation: {
+      findMany: async () => [
+        dollarRows[0],
+        {
+          seriesId: 'ecb_eurusd',
+          value: null,
+          unit: 'USD_PER_EUR',
+          status: 'nd',
+          refDate: new Date('2026-11-01T00:00:00.000Z'),
+          firstSeenAt: new Date('2026-11-01T16:00:00.000Z'),
+        },
+      ],
+    },
+  };
+  const missingEur = await readDollarMacro(
+    missingEurClient as never,
+    dollarNow
+  );
+  const missingEurRow = missingEur.find(
+    (row) => row.seriesId === 'ecb_eurusd'
+  );
+  check(
+    'EUR/USD without a valid ok row is n/a',
+    missingEurRow?.value === null &&
+      missingEurRow.refDate === null &&
+      missingEurRow.firstSeenAt === null &&
+      missingEurRow.ageDays === null
+  );
+  const missingEurPage = renderLeverageMacro(
+    [],
+    [],
+    [],
+    [],
+    '2026-11-01',
+    [],
+    missingEur
+  );
+  check(
+    'EUR/USD n/a is rendered without zero',
+    missingEurPage.includes(
+      'EUR/USD (ECB reference rate), daily proxy</th><td>n/a</td><td>n/a</td><td>n/a</td>'
+    ) && !missingEurPage.includes('$0.00')
   );
 
   const leveragePage = renderLeverageMacro(

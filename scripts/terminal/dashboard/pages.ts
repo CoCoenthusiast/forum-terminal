@@ -12,6 +12,10 @@ import type { IndicatorSeries } from './series-reader';
 import { escapeHtml, sanitizeHtml, sanitizeText } from './sanitize';
 import { ROLLING_FORMULA_VERSION } from '../indicators/rolling-hourly';
 import {
+  DOLLAR_SERIES_IDS,
+  type DollarMacroValue,
+} from './macro-reader';
+import {
   COINALYZE_LEVERAGE_COINS,
   COINALYZE_LEVERAGE_METRICS,
   HOURLY_LAUNCHPAD_SLUGS,
@@ -35,6 +39,9 @@ export const COINALYZE_HOURLY_NOTICE =
   'Hourly closed candles from Coinalyze. Not comparable with the daily indicators.';
 
 export const ROLLING_HOURLY_NOTICE = `Rolling 24h captures, formula ${ROLLING_FORMULA_VERSION}. Not comparable with the daily closed indicators.`;
+
+export const DOLLAR_PROXY_NOTICE =
+  'EUR/USD is a proxy, shown separately. It is not the Fed broad dollar index and is never combined with it.';
 
 const HOUR_MS = 60 * 60 * 1000;
 const PRICE_ORDER = ['SOL', 'BTC', 'ETH'] as const;
@@ -498,9 +505,18 @@ export function renderDataHealth(
   return renderPage('Data health', body);
 }
 
+const CHART_TITLES: Record<string, string> = {
+  macro_eurusd_change_5d_pct:
+    'EUR/USD 5d change (proxy, not the broad dollar index)',
+};
+
+function chartTitle(series: IndicatorSeries): string {
+  return CHART_TITLES[series.indicator] ?? series.indicator;
+}
+
 function chartArticle(series: IndicatorSeries): string {
   return `<article class="chart">
-<h3>${escapeHtml(series.indicator)} <span class="muted">${escapeHtml(
+<h3>${escapeHtml(chartTitle(series))} <span class="muted">${escapeHtml(
     latestValueText(series)
   )}</span></h3>
 <p class="muted">${escapeHtml(series.scope)} · ${escapeHtml(series.formulaVersion)}</p>
@@ -557,13 +573,55 @@ function hyperliquidRows(
   ).join('');
 }
 
+const DOLLAR_LABELS: Record<string, string> = {
+  fed_broad_dollar: 'Broad dollar index (Fed H.10)',
+  ecb_eurusd: 'EUR/USD (ECB reference rate), daily proxy',
+};
+
+const DOLLAR_NOTES: Record<string, string> = {
+  fed_broad_dollar: 'Weekly release (Mondays), 3 to 9 days behind',
+  ecb_eurusd:
+    'Measures only the euro against the dollar, not the broad dollar index',
+};
+
+function dollarValueCell(row: DollarMacroValue | undefined): string {
+  if (row === undefined || row.value === null) return 'n/a';
+  const value = escapeHtml(formatHourlyValue(row.value, null));
+  if (row.unit === null || row.unit.length === 0) return value;
+  return `${value} <span class="muted">${escapeHtml(row.unit)}</span>`;
+}
+
+function dollarDateCell(row: DollarMacroValue | undefined): string {
+  if (row === undefined || row.refDate === null) return 'n/a';
+  return escapeHtml(formatClosedDate(row.refDate));
+}
+
+function dollarAgeCell(row: DollarMacroValue | undefined): string {
+  if (row === undefined || row.ageDays === null) return 'n/a';
+  return `${row.ageDays}d old`;
+}
+
+function dollarRows(dollarMacro: readonly DollarMacroValue[]): string {
+  return DOLLAR_SERIES_IDS.map((seriesId) => {
+    const row = dollarMacro.find((item) => item.seriesId === seriesId);
+    return `<tr><th scope="row">${escapeHtml(
+      DOLLAR_LABELS[seriesId] ?? seriesId
+    )}</th><td>${dollarValueCell(row)}</td><td>${dollarDateCell(
+      row
+    )}</td><td>${dollarAgeCell(row)}</td><td>${escapeHtml(
+      DOLLAR_NOTES[seriesId] ?? ''
+    )}</td></tr>`;
+  }).join('');
+}
+
 export function renderLeverageMacro(
   leverage: readonly IndicatorSeries[],
   macro: readonly IndicatorSeries[],
   hyperliquidHourly: readonly HourlyMetricValue[] = [],
   hyperliquidDaily: readonly DailyMetricValue[] = [],
   asOf = 'n/a',
-  coinalyzeHourly: readonly CoinalyzeHourlyValue[] = []
+  coinalyzeHourly: readonly CoinalyzeHourlyValue[] = [],
+  dollarMacro: readonly DollarMacroValue[] = []
 ): string {
   const leverageCharts =
     leverage.length === 0 ? '<p>n/a</p>' : leverage.map(chartArticle).join('\n');
@@ -591,6 +649,13 @@ ${leverageCharts}
 <section>
 <h2>Macro (US)</h2>
 <p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
+<h3>Dollar</h3>
+<p class="notice">${escapeHtml(DOLLAR_PROXY_NOTICE)}</p>
+<div class="table-scroll"><table>
+<thead><tr><th>Series</th><th>Latest value</th><th>Observation date</th><th>Age</th><th>Note</th></tr></thead>
+<tbody>${dollarRows(dollarMacro)}</tbody>
+</table></div>
+<p class="muted">Sources: Federal Reserve H.10; European Central Bank (ECB reference rates).</p>
 ${macroCharts}
 </section>
 <section>

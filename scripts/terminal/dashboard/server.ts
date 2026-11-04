@@ -38,6 +38,7 @@ import {
   readRollingLaunchpadHourly,
   readRollingOverviewHourly,
 } from './hourly-reader';
+import { readDollarMacro } from './macro-reader';
 import {
   renderDataHealth,
   renderLaunchpads,
@@ -56,6 +57,10 @@ export const DEFAULT_PORT = 3000;
 const RETURN_FORMULA_VERSION = 'v1';
 const MACRO_FORMULA_VERSION = MACRO_INDICATOR_FORMULA_VERSION;
 const COINALYZE_SCOPE = 'coinalyze:SOL';
+const MACRO_DOLLAR_INDICATOR_IDS = [
+  'macro_dollar_broad_change_5d_pct',
+  'macro_eurusd_change_5d_pct',
+] as const;
 
 type DashboardClient = PrismaClient;
 
@@ -247,6 +252,13 @@ function leverageMacroTargets(): { leverage: SeriesTarget[]; macro: SeriesTarget
     formulaVersion: MACRO_INDICATOR_FORMULA_VERSION,
   }));
 
+  const macroIds = new Set(macro.map((target) => target.indicator));
+  for (const indicator of MACRO_DOLLAR_INDICATOR_IDS) {
+    if (!macroIds.has(indicator)) {
+      throw new Error(`missing macro indicator ${indicator}`);
+    }
+  }
+
   return { leverage, macro };
 }
 
@@ -378,11 +390,13 @@ async function handleRequest(
       hyperliquidHourly,
       hyperliquidDaily,
       coinalyzeHourly,
+      dollarMacro,
     ] = await Promise.all([
       readIndicatorSeries(client, [...leverage, ...macro], resolved.date),
       readHyperliquidHourly(client, now),
       readHyperliquidDaily(client, resolved.date),
       readCoinalyzeLeverageHourly(client, now),
+      readDollarMacro(client, now),
     ]);
     sendHtml(
       res,
@@ -393,7 +407,8 @@ async function handleRequest(
         hyperliquidHourly,
         hyperliquidDaily,
         resolved.date,
-        coinalyzeHourly
+        coinalyzeHourly,
+        dollarMacro
       )
     );
     return;
