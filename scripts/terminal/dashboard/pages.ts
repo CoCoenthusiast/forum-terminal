@@ -10,6 +10,7 @@ import {
 } from './charts';
 import type { IndicatorSeries } from './series-reader';
 import { escapeHtml, sanitizeHtml, sanitizeText } from './sanitize';
+import { ROLLING_FORMULA_VERSION } from '../indicators/rolling-hourly';
 import {
   COINALYZE_LEVERAGE_COINS,
   COINALYZE_LEVERAGE_METRICS,
@@ -20,6 +21,7 @@ import {
   type DailyMetricValue,
   type HourlyMetricValue,
   type LatestPriceValue,
+  type RollingHourlyValue,
 } from './hourly-reader';
 import type { TokenChartPoint, TokenDetail, TokenSummary } from './token-reader';
 
@@ -31,6 +33,8 @@ export const INTEGRATED_NOTICE =
 
 export const COINALYZE_HOURLY_NOTICE =
   'Hourly closed candles from Coinalyze. Not comparable with the daily indicators.';
+
+export const ROLLING_HOURLY_NOTICE = `Rolling 24h captures, formula ${ROLLING_FORMULA_VERSION}. Not comparable with the daily closed indicators.`;
 
 const HOUR_MS = 60 * 60 * 1000;
 const PRICE_ORDER = ['SOL', 'BTC', 'ETH'] as const;
@@ -229,6 +233,66 @@ function priceRow(
   )}</td><td>${latestPriceCell(latest)}</td></tr>`;
 }
 
+function formatRollingDeviation(value: number | null): string {
+  if (value === null) return 'n/a';
+  const percent = value * 100;
+  return `${percent > 0 ? '+' : ''}${percent.toFixed(2)}%`;
+}
+
+function rollingValueText(row: RollingHourlyValue | undefined): string {
+  if (
+    row === undefined ||
+    row.relativeDeviation === null ||
+    row.referenceMean === null
+  ) {
+    return 'n/a';
+  }
+  return `${formatRollingDeviation(row.relativeDeviation)} vs mean ${formatHourlyValue(
+    row.referenceMean,
+    'USD'
+  )}`;
+}
+
+function rollingCadenceText(row: RollingHourlyValue | undefined): string {
+  if (row === undefined || row.updatesOnceDaily === null) return 'n/a';
+  if (!row.updatesOnceDaily) return 'source updates more than once a day';
+  const lastChange = formatHourlyUtc(row.lastChangeAt);
+  return `source updates once a day (00:00 UTC); last change ${lastChange}`;
+}
+
+function findRolling(
+  rows: readonly RollingHourlyValue[],
+  scope: string,
+  metric: string
+): RollingHourlyValue | undefined {
+  return rows.find((row) => row.scope === scope && row.metric === metric);
+}
+
+function launchpadRollingCell(
+  volume: RollingHourlyValue | undefined,
+  fees: RollingHourlyValue | undefined
+): string {
+  return `<div>Volume: ${escapeHtml(rollingValueText(volume))}</div><div>Fees: ${escapeHtml(
+    rollingValueText(fees)
+  )}</div>`;
+}
+
+function launchpadCadenceCell(
+  volume: RollingHourlyValue | undefined,
+  fees: RollingHourlyValue | undefined
+): string {
+  return `<div>Volume: ${escapeHtml(rollingCadenceText(volume))}</div><div>Fees: ${escapeHtml(
+    rollingCadenceText(fees)
+  )}</div>`;
+}
+
+function overviewRollingRows(rolling: readonly RollingHourlyValue[]): string {
+  const row = findRolling(rolling, 'solana', 'dex_volume_24h_usd');
+  return `<tr><th scope="row">Solana DEX volume 24h</th><td>${escapeHtml(
+    rollingValueText(row)
+  )}</td><td>${escapeHtml(rollingCadenceText(row))}</td></tr>`;
+}
+
 function overviewActivityRows(
   hourly: readonly HourlyMetricValue[],
   daily: readonly DailyMetricValue[]
@@ -344,7 +408,8 @@ export function renderOverview(
   input: RecapInput,
   hourly: readonly HourlyMetricValue[] = [],
   latestPrices: readonly LatestPriceValue[] = [],
-  daily: readonly DailyMetricValue[] = []
+  daily: readonly DailyMetricValue[] = [],
+  rolling: readonly RollingHourlyValue[] = []
 ): string {
   const asOf = typeof input.asOf === 'string' && input.asOf.length > 0 ? input.asOf : 'n/a';
   const leverageDate = oldestDate([
@@ -381,6 +446,15 @@ export function renderOverview(
 <table>
 <thead><tr><th>Metric</th><th>Closed</th><th>Latest</th></tr></thead>
 <tbody>${overviewActivityRows(hourly, daily)}</tbody>
+</table>
+</section>
+<section>
+<h2>Rolling activity</h2>
+<p class="notice">${escapeHtml(ROLLING_HOURLY_NOTICE)}</p>
+<p class="muted">Powered by DefiLlama</p>
+<table>
+<thead><tr><th>Metric</th><th>Rolling vs 7d mean</th><th>Source cadence</th></tr></thead>
+<tbody>${overviewRollingRows(rolling)}</tbody>
 </table>
 </section>
 <section>
@@ -569,7 +643,8 @@ function launchpadCell(series: IndicatorSeries | undefined): string {
 export function renderLaunchpads(
   groups: readonly LaunchpadIndicatorGroup[],
   hourly: readonly HourlyMetricValue[] = [],
-  asOf = 'n/a'
+  asOf = 'n/a',
+  rolling: readonly RollingHourlyValue[] = []
 ): string {
   const platformList = LAUNCHPAD_SLUGS.map((slug) => launchpadLabel(slug)).join(', ');
   const platformSlugs = [
@@ -582,7 +657,7 @@ export function renderLaunchpads(
   const table = `<div class="table-scroll"><table>
 <thead><tr><th>Platform</th>${groups
     .map((group) => `<th>${escapeHtml(group.indicator)}</th>`)
-    .join('')}<th>Latest 24h volume</th><th>Latest 24h fees</th></tr></thead>
+    .join('')}<th>Rolling vs 7d mean</th><th>Source cadence</th><th>Latest 24h volume</th><th>Latest 24h fees</th></tr></thead>
 <tbody>${platformSlugs
     .map((slug) => {
       const cells = groups
@@ -594,9 +669,17 @@ export function renderLaunchpads(
       const scope = `solana:protocol:${slug}`;
       const latestVolume = findHourly(hourly, scope, 'dex_volume_24h_usd');
       const latestFees = findHourly(hourly, scope, 'fees_24h_usd');
-      return `<tr><th scope="row">${escapeHtml(launchpadLabel(slug))}</th>${cells}<td>${latestMetricCell(
-        latestVolume
-      )}</td><td>${latestMetricCell(latestFees)}</td></tr>`;
+      const rollingVolume = findRolling(rolling, scope, 'dex_volume_24h_usd');
+      const rollingFees = findRolling(rolling, scope, 'fees_24h_usd');
+      return `<tr><th scope="row">${escapeHtml(launchpadLabel(slug))}</th>${cells}<td>${launchpadRollingCell(
+        rollingVolume,
+        rollingFees
+      )}</td><td>${launchpadCadenceCell(
+        rollingVolume,
+        rollingFees
+      )}</td><td>${latestMetricCell(latestVolume)}</td><td>${latestMetricCell(
+        latestFees
+      )}</td></tr>`;
     })
     .join('')}</tbody>
 </table></div>`;
@@ -636,6 +719,8 @@ ${renderMultiLineChart(
 <section>
 <h2>Summary</h2>
 <p class="notice">${escapeHtml(INTEGRATED_NOTICE)}</p>
+<p class="notice">${escapeHtml(ROLLING_HOURLY_NOTICE)}</p>
+<p class="muted">Powered by DefiLlama</p>
 <p class="muted">Computed on closed day ${escapeHtml(asOf)}</p>
 ${shareSummaryNote}
 ${table}

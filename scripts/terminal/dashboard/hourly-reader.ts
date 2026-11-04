@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../generated/db/client';
+import { computeRollingHourly } from '../indicators/rolling-hourly';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -8,6 +9,8 @@ const HOURLY_QUERY_LIMIT = 500;
 const LATEST_PRICE_QUERY_LIMIT = 500;
 const DAILY_QUERY_LIMIT = 500;
 const COINALYZE_HOURLY_QUERY_LIMIT = 500;
+const ROLLING_QUERY_LIMIT = 10000;
+const ROLLING_LOOKBACK_MS = 8 * 24 * HOUR_MS;
 
 type HourlyClient = Pick<PrismaClient, 'metricSnapshot'>;
 type LatestPriceClient = Pick<PrismaClient, 'marketSnapshot'>;
@@ -49,6 +52,18 @@ export interface CoinalyzeHourlyValue {
   unit: string | null;
   sourceTs: Date | null;
   stale: boolean;
+}
+
+export interface RollingHourlyValue {
+  scope: string;
+  metric: string;
+  current: number | null;
+  currentAt: Date | null;
+  referenceMean: number | null;
+  relativeDeviation: number | null;
+  referencePoints: number;
+  updatesOnceDaily: boolean | null;
+  lastChangeAt: Date | null;
 }
 
 const OVERVIEW_SOLANA_INDICATORS = [
@@ -121,6 +136,14 @@ interface CoinalyzeMetricSnapshotRow {
   unit: string | null;
   sourceTs: Date | null;
   collectedAt: Date;
+}
+
+interface RollingMetricSnapshotRow {
+  scope: string;
+  metric: string;
+  value: unknown;
+  collectedAt: Date;
+  sourceTs: Date | null;
 }
 
 function toNumber(value: unknown): number | null {
@@ -335,6 +358,99 @@ export async function readCoinalyzeLeverageHourly(
   return scopes.flatMap((scope) =>
     COINALYZE_LEVERAGE_METRICS.map((metric) =>
       buildCoinalyzeValue(scope, metric, latest.get(metricKey(scope, metric)), now)
+    )
+  );
+}
+
+async function rollingMetrics(
+  client: HourlyClient,
+  scopes: readonly string[],
+  metrics: readonly string[],
+  now: Date
+): Promise<Map<string, RollingMetricSnapshotRow[]>> {
+  const since = new Date(now.getTime() - ROLLING_LOOKBACK_MS);
+  const rows = await client.metricSnapshot.findMany({
+    where: {
+      scope: { in: [...scopes] },
+      metric: { in: [...metrics] },
+      collectedAt: { gte: since, lte: now },
+    },
+    orderBy: { collectedAt: 'desc' },
+    take: ROLLING_QUERY_LIMIT,
+    select: {
+      scope: true,
+      metric: true,
+      value: true,
+      collectedAt: true,
+      sourceTs: true,
+    },
+  });
+
+  const grouped = new Map<string, RollingMetricSnapshotRow[]>();
+  for (const row of rows) {
+    const key = metricKey(row.scope, row.metric);
+    const group = grouped.get(key);
+    if (group === undefined) grouped.set(key, [row]);
+    else group.push(row);
+  }
+  return grouped;
+}
+
+function buildRollingValue(
+  scope: string,
+  metric: string,
+  rows: readonly RollingMetricSnapshotRow[],
+  now: Date
+): RollingHourlyValue {
+  const result = computeRollingHourly(
+    rows.map((row) => ({
+      sourceTs: row.sourceTs,
+      collectedAt: row.collectedAt,
+      value: toNumber(row.value),
+    })),
+    now
+  );
+  return {
+    scope,
+    metric,
+    current: result.current,
+    currentAt: result.currentAt,
+    referenceMean: result.referenceMean,
+    relativeDeviation: result.relativeDeviation,
+    referencePoints: result.referencePoints,
+    updatesOnceDaily: result.cadence.updatesOnceDaily,
+    lastChangeAt: result.cadence.lastChangeAt,
+  };
+}
+
+export async function readRollingOverviewHourly(
+  client: HourlyClient,
+  now: Date = new Date()
+): Promise<RollingHourlyValue[]> {
+  const scopes = ['solana'];
+  const metrics = ['dex_volume_24h_usd'];
+  const grouped = await rollingMetrics(client, scopes, metrics, now);
+  return scopes.flatMap((scope) =>
+    metrics.map((metric) =>
+      buildRollingValue(scope, metric, grouped.get(metricKey(scope, metric)) ?? [], now)
+    )
+  );
+}
+
+export async function readRollingLaunchpadHourly(
+  client: HourlyClient,
+  now: Date = new Date()
+): Promise<RollingHourlyValue[]> {
+  const scopes = HOURLY_LAUNCHPAD_SLUGS.map((slug) => `solana:protocol:${slug}`);
+  const grouped = await rollingMetrics(
+    client,
+    scopes,
+    HOURLY_LAUNCHPAD_INDICATORS,
+    now
+  );
+  return scopes.flatMap((scope) =>
+    HOURLY_LAUNCHPAD_INDICATORS.map((metric) =>
+      buildRollingValue(scope, metric, grouped.get(metricKey(scope, metric)) ?? [], now)
     )
   );
 }

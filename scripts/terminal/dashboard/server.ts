@@ -35,6 +35,8 @@ import {
   readLatestPrices,
   readOverviewDaily,
   readOverviewHourly,
+  readRollingLaunchpadHourly,
+  readRollingOverviewHourly,
 } from './hourly-reader';
 import {
   renderDataHealth,
@@ -335,13 +337,18 @@ async function handleRequest(
       return;
     }
     const client = await resolveClient();
-    const [input, hourly, latestPrices, daily] = await Promise.all([
+    const [input, hourly, latestPrices, daily, rolling] = await Promise.all([
       readRecapInput(client, resolved.date),
       readOverviewHourly(client, now),
       readLatestPrices(client, now),
       readOverviewDaily(client, resolved.date),
+      readRollingOverviewHourly(client, now),
     ]);
-    sendHtml(res, 200, renderOverview(input, hourly, latestPrices, daily));
+    sendHtml(
+      res,
+      200,
+      renderOverview(input, hourly, latestPrices, daily, rolling)
+    );
     return;
   }
 
@@ -400,13 +407,14 @@ async function handleRequest(
     }
     const client = await resolveClient();
     const groups = launchpadTargetGroups();
-    const [series, hourly] = await Promise.all([
+    const [series, hourly, rolling] = await Promise.all([
       readIndicatorSeries(
         client,
         groups.flatMap((group) => group.targets),
         resolved.date
       ),
       readLaunchpadHourly(client, now),
+      readRollingLaunchpadHourly(client, now),
     ]);
     let cursor = 0;
     const view: LaunchpadIndicatorGroup[] = groups.map((group) => {
@@ -420,7 +428,11 @@ async function handleRequest(
       });
       return { indicator: group.indicator, unit: group.unit, platforms };
     });
-    sendHtml(res, 200, renderLaunchpads(view, hourly, resolved.date));
+    sendHtml(
+      res,
+      200,
+      renderLaunchpads(view, hourly, resolved.date, rolling)
+    );
     return;
   }
 

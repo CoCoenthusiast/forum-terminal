@@ -8,6 +8,7 @@ import {
   COINALYZE_HOURLY_NOTICE,
   DASHBOARD_FOOTER,
   INTEGRATED_NOTICE,
+  ROLLING_HOURLY_NOTICE,
   renderDataHealth,
   renderLaunchpads,
   renderLeverageMacro,
@@ -35,6 +36,8 @@ import {
   readLatestPrices,
   readOverviewDaily,
   readOverviewHourly,
+  readRollingLaunchpadHourly,
+  readRollingOverviewHourly,
 } from './hourly-reader';
 import {
   readTokenDetail,
@@ -453,6 +456,206 @@ async function main(): Promise<void> {
   check(
     'overview labels the closed day',
     integratedOverview.includes('Computed on closed day 2026-11-01')
+  );
+
+  interface RollingQuery {
+    where?: {
+      scope?: { in?: string[] };
+      metric?: { in?: string[] };
+      collectedAt?: { gte?: Date; lte?: Date };
+    };
+    orderBy?: { collectedAt?: 'desc' };
+    take?: number;
+  }
+
+  check(
+    'rolling notice is fixed',
+    ROLLING_HOURLY_NOTICE ===
+      'Rolling 24h captures, formula rolling_hourly_v1. Not comparable with the daily closed indicators.'
+  );
+
+  const rollingNow = new Date('2026-11-02T12:00:00.000Z');
+  const rollingCurrentAt = new Date('2026-11-02T11:00:00.000Z');
+  const rollingValues = [100, 110, 120, 130, 140, 150, 160];
+  const rollingRows = [
+    {
+      scope: 'solana',
+      metric: 'dex_volume_24h_usd',
+      value: 200,
+      collectedAt: rollingCurrentAt,
+      sourceTs: null,
+    },
+    ...rollingValues.map((value, index) => ({
+      scope: 'solana',
+      metric: 'dex_volume_24h_usd',
+      value,
+      collectedAt: new Date(
+        rollingCurrentAt.getTime() - (index + 1) * 24 * 60 * 60 * 1000
+      ),
+      sourceTs: null,
+    })),
+  ];
+  const rollingQueries: RollingQuery[] = [];
+  const rollingClient = {
+    metricSnapshot: {
+      findMany: async (args: RollingQuery) => {
+        rollingQueries.push(args);
+        return rollingRows;
+      },
+    },
+  };
+  const rollingOverview = await readRollingOverviewHourly(
+    rollingClient as never,
+    rollingNow
+  );
+  const rollingQuery = rollingQueries[0];
+  check(
+    'rolling overview reads the Solana DEX volume series',
+    rollingOverview.length === 1 &&
+      rollingOverview[0]?.scope === 'solana' &&
+      rollingOverview[0]?.metric === 'dex_volume_24h_usd'
+  );
+  check(
+    'rolling query uses an 8-day capture window',
+    rollingQuery?.where?.scope?.in?.includes('solana') === true &&
+      rollingQuery?.where?.metric?.in?.includes('dex_volume_24h_usd') === true &&
+      rollingQuery?.where?.collectedAt?.gte?.getTime() ===
+        rollingNow.getTime() - 8 * 24 * 60 * 60 * 1000 &&
+      rollingQuery?.where?.collectedAt?.lte?.getTime() === rollingNow.getTime() &&
+      (rollingQuery?.take ?? 0) > 0
+  );
+  const rollingSolana = rollingOverview[0];
+  check(
+    'rolling overview computes current, mean and relative deviation',
+    rollingSolana?.current === 200 &&
+      rollingSolana.referencePoints === 7 &&
+      Math.abs((rollingSolana.referenceMean ?? 0) - 138.75) < 1e-9 &&
+      Math.abs((rollingSolana.relativeDeviation ?? 0) - (200 / 138.75 - 1)) <
+        1e-9
+  );
+  check(
+    'rolling overview detects a once-a-day source and last change',
+    rollingSolana?.updatesOnceDaily === true &&
+      rollingSolana.lastChangeAt?.toISOString() ===
+        '2026-11-02T11:00:00.000Z'
+  );
+  const rollingOverviewPage = renderOverview(
+    emptyInput(),
+    [],
+    [],
+    [],
+    rollingOverview
+  );
+  check(
+    'overview shows the rolling activity block',
+    rollingOverviewPage.includes('<h2>Rolling activity</h2>') &&
+      rollingOverviewPage.includes(ROLLING_HOURLY_NOTICE) &&
+      rollingOverviewPage.includes('<th>Rolling vs 7d mean</th><th>Source cadence</th>') &&
+      rollingOverviewPage.includes('Powered by DefiLlama')
+  );
+  check(
+    'overview rolling block shows deviation, mean and cadence',
+    rollingOverviewPage.includes('+44.14% vs mean 138.75 USD') &&
+      rollingOverviewPage.includes(
+        'source updates once a day (00:00 UTC); last change 2026-11-02 11:00 UTC'
+      )
+  );
+
+  const rollingLaunchRows = [
+    ...rollingRows.map((row) => ({
+      ...row,
+      scope: 'solana:protocol:pump.fun',
+      metric: 'dex_volume_24h_usd',
+    })),
+    ...rollingRows.map((row) => ({
+      ...row,
+      scope: 'solana:protocol:pump.fun',
+      metric: 'fees_24h_usd',
+    })),
+  ];
+  const rollingLaunchClient = {
+    metricSnapshot: { findMany: async () => rollingLaunchRows },
+  };
+  const rollingLaunchpads = await readRollingLaunchpadHourly(
+    rollingLaunchClient as never,
+    rollingNow
+  );
+  const rollingPumpVolume = rollingLaunchpads.find(
+    (row) =>
+      row.scope === 'solana:protocol:pump.fun' &&
+      row.metric === 'dex_volume_24h_usd'
+  );
+  const rollingPumpFees = rollingLaunchpads.find(
+    (row) =>
+      row.scope === 'solana:protocol:pump.fun' &&
+      row.metric === 'fees_24h_usd'
+  );
+  check(
+    'rolling launchpads cover 8 slugs x 2 metrics',
+    rollingLaunchpads.length === 16 &&
+      rollingPumpVolume?.current === 200 &&
+      rollingPumpFees?.current === 200
+  );
+  check(
+    'rolling launchpads missing platforms are n/a',
+    rollingLaunchpads.find(
+      (row) =>
+        row.scope === 'solana:protocol:pumpswap' &&
+        row.metric === 'dex_volume_24h_usd'
+    )?.current === null
+  );
+  const rollingLaunchPage = renderLaunchpads(
+    [],
+    [],
+    '2026-11-01',
+    rollingLaunchpads
+  );
+  check(
+    'launchpads adds rolling and cadence columns next to the daily columns',
+    rollingLaunchPage.includes(
+      '<th>Rolling vs 7d mean</th><th>Source cadence</th><th>Latest 24h volume</th><th>Latest 24h fees</th>'
+    ) &&
+      rollingLaunchPage.includes(ROLLING_HOURLY_NOTICE) &&
+      rollingLaunchPage.includes('Powered by DefiLlama')
+  );
+  check(
+    'launchpads rolling cells show volume and fees',
+    rollingLaunchPage.includes('Volume: +44.14% vs mean 138.75 USD') &&
+      rollingLaunchPage.includes('Fees: +44.14% vs mean 138.75 USD') &&
+      rollingLaunchPage.includes(
+        'Volume: source updates once a day (00:00 UTC); last change 2026-11-02 11:00 UTC'
+      )
+  );
+
+  const emptyRollingClient = {
+    metricSnapshot: { findMany: async () => [] },
+  };
+  const emptyRolling = await readRollingLaunchpadHourly(
+    emptyRollingClient as never,
+    rollingNow
+  );
+  check(
+    'rolling with no captures is n/a, never zero',
+    emptyRolling.length === 16 &&
+      emptyRolling.every(
+        (row) =>
+          row.current === null &&
+          row.referenceMean === null &&
+          row.relativeDeviation === null &&
+          row.updatesOnceDaily === null
+      )
+  );
+  const emptyRollingPage = renderLaunchpads(
+    [],
+    [],
+    '2026-11-01',
+    emptyRolling
+  );
+  check(
+    'launchpads rolling n/a is rendered without zero',
+    emptyRollingPage.includes('Volume: n/a') &&
+      emptyRollingPage.includes('Fees: n/a') &&
+      !emptyRollingPage.includes('0 USD')
   );
 
   const hyperRows = [
