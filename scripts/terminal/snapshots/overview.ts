@@ -27,6 +27,12 @@ const OVERVIEW_ACTIVITY = [
   { label: 'BTC dominance', scope: 'global', metric: 'btc_dominance_pct' },
 ] as const;
 
+const OVERVIEW_CLOSED_METRIC_SOURCE: Partial<
+  Record<(typeof OVERVIEW_ACTIVITY)[number]['metric'], string>
+> = {
+  dex_volume_24h_usd: 'dex_volume_daily_usd',
+};
+
 export interface OverviewSnapshotPrice {
   asset: string;
   closed: {
@@ -261,8 +267,10 @@ export function buildOverviewPayload(
 
   const marketActivity: OverviewSnapshotMarketActivity[] = OVERVIEW_ACTIVITY.map(
     (item) => {
+      const closedMetric =
+        OVERVIEW_CLOSED_METRIC_SOURCE[item.metric] ?? item.metric;
       const closed = daily.find(
-        (row) => row.scope === item.scope && row.metric === item.metric
+        (row) => row.scope === item.scope && row.metric === closedMetric
       );
       const latest = hourly.find(
         (row) => row.scope === item.scope && row.metric === item.metric

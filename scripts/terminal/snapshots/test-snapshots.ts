@@ -136,17 +136,15 @@ function overviewReaders(): {
   }));
 
   const daily: DailyMetricValue[] = [
-    ['solana', 'tvl_usd', 11, 'USD'],
-    ['solana', 'stablecoin_supply_usd', 21, 'USD'],
-    ['solana', 'dex_volume_24h_usd', 31, 'USD'],
-    ['global', 'global_market_cap_usd', 41, 'USD'],
-    ['global', 'btc_dominance_pct', 51, 'FRACTION'],
-  ].map(([scope, metric, value, unit]) => ({
+    ['solana', 'tvl_usd', 11, 'USD', '2026-11-04T00:00:00.000Z'],
+    ['solana', 'stablecoin_supply_usd', 21, 'USD', '2026-11-04T00:00:00.000Z'],
+    ['solana', 'dex_volume_daily_usd', 31, 'USD', '2026-11-03T00:00:00.000Z'],
+  ].map(([scope, metric, value, unit, asOf]) => ({
     scope: scope as string,
     metric: metric as string,
     value: value as number,
     unit: unit as string,
-    asOf: new Date('2026-11-04T00:00:00.000Z'),
+    asOf: new Date(asOf as string),
   }));
 
   const rolling: RollingHourlyValue[] = [
@@ -356,6 +354,80 @@ async function main(): Promise<void> {
     snapshot.marketActivity[0]?.latest.collectedAt !== null &&
       iso.test(snapshot.marketActivity[0]?.latest.collectedAt as string)
   );
+
+  const tvlActivity = snapshot.marketActivity.find(
+    (row) => row.metric === 'tvl_usd'
+  );
+  const stablecoinActivity = snapshot.marketActivity.find(
+    (row) => row.metric === 'stablecoin_supply_usd'
+  );
+  const dexActivity = snapshot.marketActivity.find(
+    (row) => row.metric === 'dex_volume_24h_usd'
+  );
+  const globalMarketCapActivity = snapshot.marketActivity.find(
+    (row) => row.metric === 'global_market_cap_usd'
+  );
+  const btcDominanceActivity = snapshot.marketActivity.find(
+    (row) => row.metric === 'btc_dominance_pct'
+  );
+
+  check(
+    'market TVL closed comes from the tvl_usd daily metric',
+    tvlActivity?.closed.value === 11 &&
+      tvlActivity.closed.asOf === '2026-11-04T00:00:00.000Z'
+  );
+  check(
+    'market Stablecoins closed comes from the stablecoin_supply_usd daily metric',
+    stablecoinActivity?.closed.value === 21 &&
+      stablecoinActivity.closed.asOf === '2026-11-04T00:00:00.000Z'
+  );
+  check(
+    'market DEX volume closed comes from the dex_volume_daily_usd daily metric',
+    dexActivity?.closed.value === 31 &&
+      dexActivity.closed.asOf === '2026-11-03T00:00:00.000Z'
+  );
+  check(
+    'market DEX volume latest still comes from dex_volume_24h_usd',
+    dexActivity?.metric === 'dex_volume_24h_usd' &&
+      dexActivity.label === 'DEX volume 24h' &&
+      dexActivity.latest.value === 30
+  );
+  check(
+    'global market cap and BTC dominance closed stay null',
+    globalMarketCapActivity?.closed.value === null &&
+      globalMarketCapActivity.closed.asOf === null &&
+      btcDominanceActivity?.closed.value === null &&
+      btcDominanceActivity.closed.asOf === null
+  );
+
+  const marketKeys = Object.keys(snapshot.marketActivity[0] ?? {}).sort();
+  const closedKeys = Object.keys(snapshot.marketActivity[0]?.closed ?? {}).sort();
+  const latestKeys = Object.keys(snapshot.marketActivity[0]?.latest ?? {}).sort();
+  check(
+    'market activity keeps only the snapshot fields',
+    JSON.stringify(marketKeys) ===
+      JSON.stringify(['closed', 'label', 'latest', 'metric', 'scope']) &&
+      JSON.stringify(closedKeys) ===
+        JSON.stringify(['asOf', 'unit', 'value']) &&
+      JSON.stringify(latestKeys) ===
+        JSON.stringify(['collectedAt', 'unit', 'value'])
+  );
+
+  const missingDailySnapshot = buildOverviewPayload(
+    overviewInput(),
+    readers.hourly,
+    readers.latestPrices,
+    [],
+    readers.rolling,
+    new Date('2026-11-05T12:34:56.789Z')
+  );
+  check(
+    'missing market closed values are null, never zero',
+    missingDailySnapshot.marketActivity.every(
+      (row) => row.closed.value === null && row.closed.asOf === null
+    )
+  );
+
   check(
     'rolling last change is ISO 8601 UTC',
     snapshot.rollingActivity[0]?.lastChangeAt !== null &&
