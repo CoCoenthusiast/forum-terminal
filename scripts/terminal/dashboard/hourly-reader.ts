@@ -8,6 +8,8 @@ export const HOURLY_STALE_HOURS = 3;
 const HOURLY_QUERY_LIMIT = 500;
 const LATEST_PRICE_QUERY_LIMIT = 500;
 const DAILY_QUERY_LIMIT = 500;
+const OVERVIEW_CLOSED_QUERY_LIMIT = 100;
+const OVERVIEW_CLOSED_LOOKBACK_DAYS = 15;
 const COINALYZE_HOURLY_QUERY_LIMIT = 500;
 const ROLLING_QUERY_LIMIT = 10000;
 const ROLLING_LOOKBACK_MS = 8 * 24 * HOUR_MS;
@@ -15,6 +17,7 @@ const ROLLING_LOOKBACK_MS = 8 * 24 * HOUR_MS;
 type HourlyClient = Pick<PrismaClient, 'metricSnapshot'>;
 type LatestPriceClient = Pick<PrismaClient, 'marketSnapshot'>;
 type DailyClient = Pick<PrismaClient, 'indicatorSnapshot'>;
+type OverviewDailyClient = Pick<PrismaClient, 'metricSnapshot'>;
 
 export const LATEST_PRICE_ASSETS = ['solana', 'bitcoin', 'ethereum'];
 const LATEST_PRICE_PROVIDER = 'coingecko';
@@ -74,6 +77,13 @@ const OVERVIEW_SOLANA_INDICATORS = [
 
 const OVERVIEW_GLOBAL_INDICATORS = ['global_market_cap_usd', 'btc_dominance_pct'];
 
+const OVERVIEW_CLOSED_PROVIDER = 'defillama_history';
+const OVERVIEW_CLOSED_METRICS = [
+  'tvl_usd',
+  'stablecoin_supply_usd',
+  'dex_volume_daily_usd',
+] as const;
+
 export const COINALYZE_HOURLY_WINDOW_HOURS = 8;
 export const COINALYZE_LEVERAGE_COINS = ['SOL', 'BTC', 'ETH'] as const;
 export const COINALYZE_LEVERAGE_METRICS = [
@@ -127,6 +137,14 @@ interface MetricSnapshotRow {
   value: unknown;
   unit: string | null;
   collectedAt: Date;
+}
+
+interface OverviewDailyMetricRow {
+  scope: string;
+  metric: string;
+  value: unknown;
+  unit: string | null;
+  sourceTs: Date | null;
 }
 
 interface CoinalyzeMetricSnapshotRow {
@@ -557,19 +575,70 @@ function dailyValuesFor(
   return values;
 }
 
+async function latestOverviewDailyMetrics(
+  client: OverviewDailyClient,
+  asOf: string
+): Promise<Map<string, OverviewDailyMetricRow>> {
+  const date = closedDay(asOf);
+  if (date === null) return new Map();
+
+  const since = new Date(
+    date.getTime() - OVERVIEW_CLOSED_LOOKBACK_DAYS * 24 * HOUR_MS
+  );
+  const rows = await client.metricSnapshot.findMany({
+    where: {
+      scope: 'solana',
+      metric: { in: [...OVERVIEW_CLOSED_METRICS] },
+      source: { provider: OVERVIEW_CLOSED_PROVIDER },
+      sourceTs: { gte: since, lte: date },
+    },
+    orderBy: { sourceTs: 'desc' },
+    take: OVERVIEW_CLOSED_QUERY_LIMIT,
+    select: {
+      scope: true,
+      metric: true,
+      value: true,
+      unit: true,
+      sourceTs: true,
+    },
+  });
+
+  const latest = new Map<string, OverviewDailyMetricRow>();
+  for (const row of rows) {
+    if (row.sourceTs === null || row.sourceTs.getTime() > date.getTime()) continue;
+    const current = latest.get(row.metric);
+    if (current === undefined || current.sourceTs === null) {
+      latest.set(row.metric, row);
+    } else if (row.sourceTs.getTime() > current.sourceTs.getTime()) {
+      latest.set(row.metric, row);
+    }
+  }
+  return latest;
+}
+
+function overviewDailyValuesFor(
+  latest: Map<string, OverviewDailyMetricRow>
+): DailyMetricValue[] {
+  return OVERVIEW_CLOSED_METRICS.map((metric) => {
+    const row = latest.get(metric);
+    return {
+      scope: 'solana',
+      metric,
+      value: row === undefined ? null : toNumber(row.value),
+      unit: row?.unit ?? null,
+      asOf: row?.sourceTs ?? null,
+    };
+  });
+}
+
 export async function readOverviewDaily(
-  client: DailyClient,
+  client: OverviewDailyClient,
   asOf: string
 ): Promise<DailyMetricValue[]> {
-  const indicators = [
-    ...OVERVIEW_SOLANA_INDICATORS,
-    ...OVERVIEW_GLOBAL_INDICATORS,
-  ];
-  const latest = await latestDailyMetrics(client, ['solana', 'global'], indicators, asOf);
-  return [
-    ...dailyValuesFor(latest, ['solana'], OVERVIEW_SOLANA_INDICATORS),
-    ...dailyValuesFor(latest, ['global'], OVERVIEW_GLOBAL_INDICATORS),
-  ];
+  // global_market_cap_usd and btc_dominance_pct have no daily series in
+  // defillama_history, so their Closed value stays n/a.
+  const latest = await latestOverviewDailyMetrics(client, asOf);
+  return overviewDailyValuesFor(latest);
 }
 
 export async function readHyperliquidDaily(

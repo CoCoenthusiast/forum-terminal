@@ -417,55 +417,80 @@ async function main(): Promise<void> {
     )
   );
 
-  interface DailyQuery {
+  interface OverviewDailyQuery {
     where?: {
-      asOf?: { lte?: Date };
-      status?: string;
+      scope?: string;
+      metric?: { in?: string[] };
+      source?: { provider?: string };
+      sourceTs?: { gte?: Date; lte?: Date };
     };
+    orderBy?: { sourceTs?: 'desc' };
     take?: number;
   }
 
+  const closedDayAt = new Date('2026-11-01T00:00:00.000Z');
   const overviewDailyRows = [
     {
       scope: 'solana',
-      indicator: 'tvl_usd',
+      metric: 'tvl_usd',
+      value: 1900,
+      unit: 'USD',
+      sourceTs: new Date('2026-10-30T00:00:00.000Z'),
+    },
+    {
+      scope: 'solana',
+      metric: 'tvl_usd',
       value: 2000,
       unit: 'USD',
-      asOf: new Date('2026-11-01T00:00:00.000Z'),
+      sourceTs: closedDayAt,
     },
     {
       scope: 'solana',
-      indicator: 'stablecoin_supply_usd',
+      metric: 'tvl_usd',
+      value: 2500,
+      unit: 'USD',
+      sourceTs: new Date('2026-11-02T00:00:00.000Z'),
+    },
+    {
+      scope: 'solana',
+      metric: 'stablecoin_supply_usd',
       value: 3000,
       unit: 'USD',
-      asOf: new Date('2026-11-01T00:00:00.000Z'),
+      sourceTs: closedDayAt,
     },
     {
       scope: 'solana',
-      indicator: 'dex_volume_24h_usd',
+      metric: 'dex_volume_daily_usd',
       value: 4000,
       unit: 'USD',
-      asOf: new Date('2026-11-01T00:00:00.000Z'),
+      sourceTs: new Date('2026-10-31T00:00:00.000Z'),
+    },
+    {
+      scope: 'solana',
+      metric: 'dex_volume_24h_usd',
+      value: 9999,
+      unit: 'USD',
+      sourceTs: closedDayAt,
     },
     {
       scope: 'global',
-      indicator: 'global_market_cap_usd',
+      metric: 'global_market_cap_usd',
       value: 5000,
       unit: 'USD',
-      asOf: new Date('2026-11-01T00:00:00.000Z'),
+      sourceTs: closedDayAt,
     },
     {
       scope: 'global',
-      indicator: 'btc_dominance_pct',
+      metric: 'btc_dominance_pct',
       value: 55,
       unit: 'PERCENT',
-      asOf: new Date('2026-11-01T00:00:00.000Z'),
+      sourceTs: closedDayAt,
     },
   ];
-  const overviewDailyQueries: DailyQuery[] = [];
+  const overviewDailyQueries: OverviewDailyQuery[] = [];
   const overviewDailyClient = {
-    indicatorSnapshot: {
-      findMany: async (args: DailyQuery) => {
+    metricSnapshot: {
+      findMany: async (args: OverviewDailyQuery) => {
         overviewDailyQueries.push(args);
         return overviewDailyRows;
       },
@@ -475,15 +500,54 @@ async function main(): Promise<void> {
     overviewDailyClient as never,
     '2026-11-01'
   );
+  const overviewDailyQuery = overviewDailyQueries[0];
+  const overviewDailyMetrics = overviewDailyQuery?.where?.metric?.in ?? [];
   check(
-    'overview daily query reads ok indicator snapshots up to the closed day',
-    overviewDailyQueries[0]?.where?.status === 'ok' &&
-      overviewDailyQueries[0]?.where?.asOf?.lte?.toISOString() ===
+    'overview daily query reads defillama_history metric snapshots up to the closed day',
+    overviewDailyQuery?.where?.scope === 'solana' &&
+      overviewDailyQuery?.where?.source?.provider === 'defillama_history' &&
+      overviewDailyMetrics.includes('tvl_usd') &&
+      overviewDailyMetrics.includes('stablecoin_supply_usd') &&
+      overviewDailyMetrics.includes('dex_volume_daily_usd') &&
+      overviewDailyMetrics.length === 3 &&
+      !overviewDailyMetrics.includes('dex_volume_24h_usd') &&
+      overviewDailyQuery?.where?.sourceTs?.lte?.toISOString() ===
         '2026-11-01T00:00:00.000Z'
   );
   check(
-    'overview daily values come from indicator snapshots',
-    overviewDaily.find((row) => row.metric === 'tvl_usd')?.value === 2000
+    'overview daily query uses a 15 day window and an explicit limit',
+    overviewDailyQuery?.where?.sourceTs?.gte?.toISOString() ===
+      '2026-10-17T00:00:00.000Z' &&
+      (overviewDailyQuery?.take ?? 0) > 0
+  );
+  check(
+    'overview daily ignores hourly defillama captures',
+    !overviewDailyMetrics.includes('dex_volume_24h_usd') &&
+      !overviewDaily.some((row) => row.metric === 'dex_volume_24h_usd')
+  );
+  const overviewTvl = overviewDaily.find((row) => row.metric === 'tvl_usd');
+  check(
+    'overview daily picks the newest sourceTs up to the closed day',
+    overviewTvl?.value === 2000 &&
+      overviewTvl.asOf?.toISOString() === '2026-11-01T00:00:00.000Z'
+  );
+  const overviewDex = overviewDaily.find(
+    (row) => row.metric === 'dex_volume_daily_usd'
+  );
+  check(
+    'overview daily DEX volume uses dex_volume_daily_usd',
+    overviewDex?.value === 4000 &&
+      overviewDex.asOf?.toISOString() === '2026-10-31T00:00:00.000Z'
+  );
+  check(
+    'overview daily closed date comes from sourceTs',
+    overviewDex?.asOf?.toISOString() === '2026-10-31T00:00:00.000Z'
+  );
+  check(
+    'overview daily skips global metrics with no daily series',
+    !overviewDailyMetrics.includes('global_market_cap_usd') &&
+      !overviewDailyMetrics.includes('btc_dominance_pct') &&
+      !overviewDaily.some((row) => row.scope === 'global')
   );
   const integratedOverview = renderOverview(
     emptyInput(),
@@ -500,6 +564,58 @@ async function main(): Promise<void> {
   check(
     'overview labels the closed day',
     integratedOverview.includes('Computed on closed day 2026-11-01')
+  );
+  check(
+    'overview DEX row keeps the 24h label but shows the daily closed series',
+    integratedOverview.includes('DEX volume 24h') &&
+      integratedOverview.includes('4,000 USD') &&
+      integratedOverview.includes('Closed 2026-10-31')
+  );
+  check(
+    'overview global market cap and BTC dominance closed are n/a',
+    integratedOverview.includes('Global market cap</th><td>n/a</td>') &&
+      integratedOverview.includes('BTC dominance</th><td>n/a</td>')
+  );
+  const overviewWithDexLatest = renderOverview(
+    emptyInput(),
+    recentHourly.map((row) =>
+      row.scope === 'solana' && row.metric === 'dex_volume_24h_usd'
+        ? {
+            ...row,
+            value: 12345,
+            unit: 'USD',
+            collectedAt: recentAt,
+            ageMs: HOUR_MS,
+            stale: false,
+          }
+        : row
+    ),
+    [],
+    overviewDaily
+  );
+  check(
+    'overview DEX latest still uses dex_volume_24h_usd',
+    overviewWithDexLatest.includes('12,345 USD') &&
+      overviewWithDexLatest.includes('4,000 USD')
+  );
+  const missingOverviewDaily = await readOverviewDaily(
+    { metricSnapshot: { findMany: async () => [] } } as never,
+    '2026-11-01'
+  );
+  check(
+    'overview daily missing metrics are n/a, never zero',
+    missingOverviewDaily.every((row) => row.value === null && row.asOf === null)
+  );
+  const missingOverview = renderOverview(
+    emptyInput(),
+    recentHourly,
+    [],
+    missingOverviewDaily
+  );
+  check(
+    'overview daily missing closed values render n/a, not zero',
+    missingOverview.includes('TVL</th><td>n/a</td>') &&
+      !missingOverview.includes('0 USD')
   );
 
   interface RollingQuery {

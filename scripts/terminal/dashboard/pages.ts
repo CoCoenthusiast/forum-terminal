@@ -229,6 +229,12 @@ const OVERVIEW_ACTIVITY_METRICS = [
   'btc_dominance_pct',
 ] as const;
 
+const OVERVIEW_CLOSED_METRIC_SOURCE: Partial<
+  Record<(typeof OVERVIEW_ACTIVITY_METRICS)[number], string>
+> = {
+  dex_volume_24h_usd: 'dex_volume_daily_usd',
+};
+
 function priceRow(
   input: RecapInput,
   asset: string,
@@ -312,10 +318,11 @@ function overviewActivityRows(
       metric === 'global_market_cap_usd' || metric === 'btc_dominance_pct'
         ? 'global'
         : 'solana';
+    const closedMetric = OVERVIEW_CLOSED_METRIC_SOURCE[metric] ?? metric;
     return `<tr><th scope="row">${escapeHtml(
       activityLabel(metric)
     )}</th><td>${closedMetricCell(
-      findDaily(daily, scope, metric)
+      findDaily(daily, scope, closedMetric)
     )}</td><td>${latestMetricCell(
       findHourly(hourly, scope, metric)
     )}</td></tr>`;
