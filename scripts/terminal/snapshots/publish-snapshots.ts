@@ -4,6 +4,7 @@ import {
   getDashboardDatabaseUrl,
   getDashboardPrisma,
 } from '../dashboard/db-readonly';
+import { publishBlockReason } from './guards';
 import { buildOnchainSnapshot, type OnchainSnapshot } from './onchain';
 import { buildOverviewSnapshot, type OverviewSnapshot } from './overview';
 import {
@@ -88,11 +89,20 @@ export async function run(
     }
     assertPayloadSize(snapshot);
     const serialized = JSON.stringify(snapshot);
+    const blockReason = publishBlockReason(args.screen, snapshot);
 
     if (args.dryRun) {
       console.log(`key: ${args.screen}`);
       console.log(`bytes: ${Buffer.byteLength(serialized, 'utf8')}`);
       console.log(`fields: ${Object.keys(snapshot).join(', ')}`);
+      console.log(
+        `publishable: ${blockReason === null ? 'yes' : `no (${blockReason})`}`
+      );
+      return;
+    }
+
+    if (blockReason !== null) {
+      console.log(`[SNAPSHOT] skipped, not published: ${blockReason}`);
       return;
     }
 

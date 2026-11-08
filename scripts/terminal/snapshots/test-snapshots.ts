@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import { publishBlockReason } from './guards';
 import {
   buildOnchainPayload,
   buildOnchainSnapshot,
@@ -1112,6 +1113,70 @@ async function main(): Promise<void> {
     'onchain builder has no database write calls',
     !/\b(?:create|update|delete|upsert|executeRaw|queryRaw)\b/.test(
       onchainSource
+    )
+  );
+
+  const blockedRegimeSnapshot = {
+    ...snapshot,
+    regime: { ...snapshot.regime, id: null },
+  };
+  const blockedRegimeReason = publishBlockReason(
+    'overview',
+    blockedRegimeSnapshot
+  );
+  check(
+    'overview guard blocks when regime is unavailable and cites asOf',
+    blockedRegimeReason ===
+      `regime not available for asOf ${blockedRegimeSnapshot.asOf}`
+  );
+
+  const noClosedPricesSnapshot = {
+    ...snapshot,
+    regime: { ...snapshot.regime, id: 'range_neutral' },
+    prices: snapshot.prices.map((price) => ({
+      ...price,
+      closed: { ...price.closed, value: null },
+    })),
+  };
+  check(
+    'overview guard blocks when every closed price is null',
+    publishBlockReason('overview', noClosedPricesSnapshot) ===
+      'no closed prices available'
+  );
+  check(
+    'overview guard allows a complete snapshot',
+    publishBlockReason('overview', snapshot) === null
+  );
+
+  const emptyOnchainSnapshot = {
+    ...onchainSnapshot,
+    metrics: onchainSnapshot.metrics.map((metric) => ({ ...metric, usd: [] })),
+  };
+  check(
+    'onchain guard blocks when every usd series is empty',
+    publishBlockReason('onchain', emptyOnchainSnapshot) ===
+      'no onchain series available'
+  );
+
+  const partiallyEmptyOnchainSnapshot = {
+    ...onchainSnapshot,
+    metrics: onchainSnapshot.metrics.map((metric, index) =>
+      index === 0 ? { ...metric, usd: [] } : metric
+    ),
+  };
+  check(
+    'onchain guard allows a snapshot with only one empty usd series',
+    publishBlockReason('onchain', partiallyEmptyOnchainSnapshot) === null
+  );
+
+  const guardsSource = readFileSync(
+    new URL('./guards.ts', import.meta.url),
+    'utf8'
+  );
+  check(
+    'guards module has no database or pg imports',
+    !/(?:from\s+["']pg["']|@\/lib\/db|PrismaClient|generated\/db|from\s+["'][^"']*prisma)/i.test(
+      guardsSource
     )
   );
 
