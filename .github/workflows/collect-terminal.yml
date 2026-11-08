@@ -47,3 +47,11 @@ jobs:
         env:
           TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
           COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
+      - name: Publish overview snapshot
+        run: npm run publish:snapshots -- --screen overview
+        timeout-minutes: 2
+        if: ${{ !cancelled() }}
+        env:
+          DASHBOARD_DATABASE_URL: ${{ secrets.DASHBOARD_DATABASE_URL }}
+          FORUM_SNAPSHOT_DATABASE_URL: ${{ secrets.FORUM_SNAPSHOT_DATABASE_URL }}
+          TERMINAL_ALLOW_REMOTE: "1"

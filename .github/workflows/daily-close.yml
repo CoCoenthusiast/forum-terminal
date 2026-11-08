@@ -77,6 +77,22 @@ jobs:
       - run: npx tsx scripts/terminal/state/compute-state.ts --save
         env:
           TERMINAL_DATABASE_URL: ${{ secrets.TERMINAL_DATABASE_URL }}
+      - name: Publish overview snapshot
+        run: npm run publish:snapshots -- --screen overview
+        timeout-minutes: 2
+        if: ${{ !cancelled() }}
+        env:
+          DASHBOARD_DATABASE_URL: ${{ secrets.DASHBOARD_DATABASE_URL }}
+          FORUM_SNAPSHOT_DATABASE_URL: ${{ secrets.FORUM_SNAPSHOT_DATABASE_URL }}
+          TERMINAL_ALLOW_REMOTE: "1"
+      - name: Publish onchain snapshot
+        run: npm run publish:snapshots -- --screen onchain
+        timeout-minutes: 2
+        if: ${{ !cancelled() }}
+        env:
+          DASHBOARD_DATABASE_URL: ${{ secrets.DASHBOARD_DATABASE_URL }}
+          FORUM_SNAPSHOT_DATABASE_URL: ${{ secrets.FORUM_SNAPSHOT_DATABASE_URL }}
+          TERMINAL_ALLOW_REMOTE: "1"
       - name: Check data freshness
         run: npm run check:freshness
         env:
