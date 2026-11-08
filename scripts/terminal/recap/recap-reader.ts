@@ -252,7 +252,31 @@ export function regimeFromStateRows(
         ? regime.reason
         : description;
 
-    return { regimeId, reason };
+    const decidedByRecord = asRecord(regime.decidedBy);
+    const decidedBy =
+      decidedByRecord !== null &&
+      typeof decidedByRecord.sol_trend === 'string' &&
+      typeof decidedByRecord.sol_relative_strength === 'string'
+        ? {
+            sol_trend: decidedByRecord.sol_trend,
+            sol_relative_strength: decidedByRecord.sol_relative_strength,
+          }
+        : null;
+
+    const contextRecord = asRecord(regime.context);
+    const context =
+      contextRecord !== null &&
+      typeof contextRecord.spot === 'string' &&
+      typeof contextRecord.onchain_liquidity === 'string' &&
+      typeof contextRecord.launchpads === 'string'
+        ? {
+            spot: contextRecord.spot,
+            onchain_liquidity: contextRecord.onchain_liquidity,
+            launchpads: contextRecord.launchpads,
+          }
+        : null;
+
+    return { regimeId, reason, decidedBy, context };
   }
 
   return null;

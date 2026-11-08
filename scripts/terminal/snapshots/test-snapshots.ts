@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { buildOverviewPayload } from './overview';
 import { parseArgs } from './publish-snapshots';
-import type { RecapInput, RecapMetric } from '../recap/recap-format';
+import { formatRecap, type RecapInput, type RecapMetric } from '../recap/recap-format';
+import { regimeFromStateRows } from '../recap/recap-reader';
 import type {
   DailyMetricValue,
   HourlyMetricValue,
@@ -463,6 +464,159 @@ async function main(): Promise<void> {
     'overview has the ratio rows',
     snapshot.sinceLastClose.some((row) => row.label === 'SOL/BTC') &&
       snapshot.sinceLastClose.some((row) => row.label === 'SOL/ETH')
+  );
+
+  const extendedRegimeInput: RecapInput = {
+    ...overviewInput(),
+    regime: {
+      regimeId: 'range_neutral',
+      reason: 'test reason',
+      decidedBy: {
+        sol_trend: 'range',
+        sol_relative_strength: 'neutral',
+      },
+      context: {
+        spot: 'calm',
+        onchain_liquidity: 'normal',
+        launchpads: 'quiet',
+      },
+    },
+  };
+  const extendedSnapshot = buildOverviewPayload(
+    extendedRegimeInput,
+    readers.hourly,
+    readers.latestPrices,
+    readers.daily,
+    readers.rolling,
+    new Date('2026-11-05T12:34:56.789Z')
+  );
+  check(
+    'overview regime passes decidedBy and context through',
+    JSON.stringify(extendedSnapshot.regime.decidedBy) ===
+      JSON.stringify({
+        sol_trend: 'range',
+        sol_relative_strength: 'neutral',
+      }) &&
+      JSON.stringify(extendedSnapshot.regime.context) ===
+        JSON.stringify({
+          spot: 'calm',
+          onchain_liquidity: 'normal',
+          launchpads: 'quiet',
+        })
+  );
+  check(
+    'overview regime without decidedBy and context keeps them null',
+    snapshot.regime.decidedBy === null && snapshot.regime.context === null
+  );
+  check(
+    'overview regime has no evidence or rule text fields',
+    !/"(?:evidence|thresholdsUsed|ruleDescription|STATE_RULE_DOC)"/.test(
+      JSON.stringify(extendedSnapshot.regime)
+    )
+  );
+  check(
+    'formatRecap ignores regime decidedBy and context',
+    formatRecap(extendedRegimeInput) ===
+      formatRecap({
+        ...overviewInput(),
+        regime: { regimeId: 'range_neutral', reason: 'test reason' },
+      })
+  );
+
+  const stateRegime = regimeFromStateRows([
+    {
+      computeMode: 'live',
+      payload: {
+        regime: {
+          regimeId: 'range_neutral',
+          reason: 'test reason',
+          decidedBy: {
+            sol_trend: 'range',
+            sol_relative_strength: 'neutral',
+          },
+          context: {
+            spot: 'calm',
+            onchain_liquidity: 'normal',
+            launchpads: 'quiet',
+          },
+        },
+      },
+    },
+  ]);
+  check(
+    'regimeFromStateRows reads decidedBy and context',
+    stateRegime?.decidedBy?.sol_trend === 'range' &&
+      stateRegime.decidedBy.sol_relative_strength === 'neutral' &&
+      stateRegime.context?.spot === 'calm' &&
+      stateRegime.context.onchain_liquidity === 'normal' &&
+      stateRegime.context.launchpads === 'quiet'
+  );
+
+  const oldStateRegime = regimeFromStateRows([
+    {
+      computeMode: 'live',
+      payload: {
+        regime: {
+          regimeId: 'range_neutral',
+          reason: 'old payload',
+        },
+      },
+    },
+  ]);
+  check(
+    'regimeFromStateRows returns null for old payloads without decidedBy and context',
+    oldStateRegime?.decidedBy === null && oldStateRegime.context === null
+  );
+
+  const invalidStateRegime = regimeFromStateRows([
+    {
+      computeMode: 'live',
+      payload: {
+        regime: {
+          regimeId: 'range_neutral',
+          reason: 'invalid decidedBy',
+          decidedBy: {
+            sol_trend: 'range',
+            sol_relative_strength: 1,
+          },
+          context: {
+            spot: 'calm',
+            onchain_liquidity: 'normal',
+            launchpads: 'quiet',
+          },
+        },
+      },
+    },
+  ]);
+  check(
+    'regimeFromStateRows returns null when a decidedBy value is not a string',
+    invalidStateRegime?.decidedBy === null &&
+      invalidStateRegime.context?.spot === 'calm'
+  );
+
+  const missingContextKeyRegime = regimeFromStateRows([
+    {
+      computeMode: 'live',
+      payload: {
+        regime: {
+          regimeId: 'range_neutral',
+          reason: 'missing context key',
+          decidedBy: {
+            sol_trend: 'range',
+            sol_relative_strength: 'neutral',
+          },
+          context: {
+            spot: 'calm',
+            onchain_liquidity: 'normal',
+          },
+        },
+      },
+    },
+  ]);
+  check(
+    'regimeFromStateRows returns null when a context key is missing',
+    missingContextKeyRegime?.context === null &&
+      missingContextKeyRegime.decidedBy?.sol_trend === 'range'
   );
 
   const secretUrl =

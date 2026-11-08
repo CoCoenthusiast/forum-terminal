@@ -75,6 +75,15 @@ export interface OverviewSnapshotRegime {
   id: string | null;
   label: string;
   reason: string | null;
+  decidedBy: {
+    sol_trend: string;
+    sol_relative_strength: string;
+  } | null;
+  context: {
+    spot: string;
+    onchain_liquidity: string;
+    launchpads: string;
+  } | null;
 }
 
 export interface OverviewSnapshotSinceLastClose {
@@ -234,6 +243,8 @@ function buildRegime(input: RecapInput): OverviewSnapshotRegime {
     label: id === null ? 'n/a' : (REGIME_LABELS[id] ?? id),
     reason:
       typeof reason === 'string' && reason.trim().length > 0 ? reason : null,
+    decidedBy: input.regime?.decidedBy ?? null,
+    context: input.regime?.context ?? null,
   };
 }
 

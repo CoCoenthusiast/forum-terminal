@@ -48,6 +48,15 @@ export interface RecapPrice {
 export interface RecapRegime {
   regimeId: string | null;
   reason?: string | null;
+  decidedBy?: {
+    sol_trend: string;
+    sol_relative_strength: string;
+  } | null;
+  context?: {
+    spot: string;
+    onchain_liquidity: string;
+    launchpads: string;
+  } | null;
 }
 
 export interface RecapLaunchpad {
