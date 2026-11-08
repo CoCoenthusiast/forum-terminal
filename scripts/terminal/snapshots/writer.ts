@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 
 export const SNAPSHOT_KEYS = [
   'overview',
+  'onchain',
   'health',
   'leverage-macro',
   'launchpads',

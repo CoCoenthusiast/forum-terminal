@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
+import {
+  buildOnchainPayload,
+  buildOnchainSnapshot,
+} from './onchain';
 import { buildOverviewPayload } from './overview';
 import { parseArgs } from './publish-snapshots';
 import { formatRecap, type RecapInput, type RecapMetric } from '../recap/recap-format';
@@ -165,6 +170,153 @@ function overviewReaders(): {
   return { hourly, latestPrices, daily, rolling };
 }
 
+interface FakeMetricSnapshotRow {
+  scope: string;
+  metric: string;
+  value: unknown;
+  collectedAt: Date;
+  sourceTs: Date | null;
+  source: { provider: string } | null;
+}
+
+interface FakeIndicatorSnapshotRow {
+  indicator: string;
+  scope: string;
+  formulaVersion: string;
+  status: string;
+  value: unknown;
+  unit: string | null;
+  asOf: Date;
+}
+
+interface FakeMetricFindManyArgs {
+  where: {
+    scope?: string;
+    metric?: { in?: readonly string[] };
+    source?: { provider?: string };
+    sourceTs?: { gte?: Date; lt?: Date; lte?: Date };
+  };
+}
+
+function fakeOnchainClient(
+  metricRows: readonly FakeMetricSnapshotRow[],
+  indicatorRows: readonly FakeIndicatorSnapshotRow[]
+): { client: unknown; metricCalls: FakeMetricFindManyArgs[] } {
+  const metricCalls: FakeMetricFindManyArgs[] = [];
+  const client = {
+    metricSnapshot: {
+      findMany: async (args: FakeMetricFindManyArgs) => {
+        metricCalls.push(args);
+        return metricRows.filter((row) => {
+          const where = args.where;
+          if (where.scope !== undefined && row.scope !== where.scope) {
+            return false;
+          }
+          if (
+            where.metric?.in !== undefined &&
+            !where.metric.in.includes(row.metric)
+          ) {
+            return false;
+          }
+          if (
+            where.source?.provider !== undefined &&
+            row.source?.provider !== where.source.provider
+          ) {
+            return false;
+          }
+          const sourceTs = row.sourceTs?.getTime();
+          if (
+            where.sourceTs?.gte !== undefined &&
+            (sourceTs === undefined ||
+              sourceTs < where.sourceTs.gte.getTime())
+          ) {
+            return false;
+          }
+          if (
+            where.sourceTs?.lt !== undefined &&
+            (sourceTs === undefined ||
+              sourceTs >= where.sourceTs.lt.getTime())
+          ) {
+            return false;
+          }
+          if (
+            where.sourceTs?.lte !== undefined &&
+            (sourceTs === undefined ||
+              sourceTs > where.sourceTs.lte.getTime())
+          ) {
+            return false;
+          }
+          return true;
+        });
+      },
+    },
+    indicatorSnapshot: {
+      findMany: async () => indicatorRows,
+    },
+  };
+  return { client, metricCalls };
+}
+
+function onchainFixtureRows(): {
+  metricRows: FakeMetricSnapshotRow[];
+  indicatorRows: FakeIndicatorSnapshotRow[];
+} {
+  const at = (date: string): Date => new Date(`${date}T00:00:00.000Z`);
+  const history = (
+    metric: string,
+    date: string,
+    value: number,
+    collectedAt: string,
+    provider = 'defillama_history'
+  ): FakeMetricSnapshotRow => ({
+    scope: 'solana',
+    metric,
+    value,
+    collectedAt: at(collectedAt),
+    sourceTs: at(date),
+    source: { provider },
+  });
+  const indicator = (
+    name: string,
+    date: string,
+    value: number,
+    unit = 'FRACTION',
+    status = 'ok'
+  ): FakeIndicatorSnapshotRow => ({
+    indicator: name,
+    scope: 'solana',
+    formulaVersion: 'v1',
+    status,
+    value,
+    unit,
+    asOf: at(date),
+  });
+
+  return {
+    metricRows: [
+      history('tvl_usd', '2026-08-06', 50, '2026-08-07'),
+      history('tvl_usd', '2026-08-07', 100, '2026-08-08'),
+      history('tvl_usd', '2026-08-09', 120, '2026-08-10'),
+      history('tvl_usd', '2026-08-10', 999, '2026-08-11', 'defillama'),
+      history('tvl_usd', '2026-11-04', 190, '2026-11-04'),
+      history('tvl_usd', '2026-11-04', 200, '2026-11-05'),
+      history('tvl_usd', '2026-11-05', 300, '2026-11-06'),
+      history('stablecoin_supply_usd', '2026-08-07', 1000, '2026-08-08'),
+      history('stablecoin_supply_usd', '2026-09-01', 1100, '2026-09-02'),
+      history('stablecoin_supply_usd', '2026-11-04', 1200, '2026-11-05'),
+      history('dex_volume_daily_usd', '2026-08-07', 10, '2026-08-08'),
+      history('dex_volume_daily_usd', '2026-08-10', 20, '2026-08-11'),
+      history('dex_volume_daily_usd', '2026-11-02', 30, '2026-11-03'),
+    ],
+    indicatorRows: [
+      indicator('tvl_vs_mean_7d', '2026-08-07', 0.05),
+      indicator('tvl_vs_mean_7d', '2026-08-09', 0.07),
+      indicator('stablecoin_supply_vs_mean_7d', '2026-09-01', -0.02),
+      indicator('dex_volume_vs_mean_7d', '2026-11-02', 0.123),
+    ],
+  };
+}
+
 function collectKeys(value: unknown, keys = new Set<string>()): Set<string> {
   if (Array.isArray(value)) {
     for (const item of value) collectKeys(item, keys);
@@ -180,6 +332,7 @@ function collectKeys(value: unknown, keys = new Set<string>()): Set<string> {
 async function main(): Promise<void> {
   const expectedKeys = [
     'overview',
+    'onchain',
     'health',
     'leverage-macro',
     'launchpads',
@@ -805,6 +958,163 @@ async function main(): Promise<void> {
     orderedLiquidity?.classification === 'expanding'
   );
 
+  const onchainFixture = onchainFixtureRows();
+  const onchainFake = fakeOnchainClient(
+    onchainFixture.metricRows,
+    onchainFixture.indicatorRows
+  );
+  const onchainSnapshot = await buildOnchainSnapshot(
+    onchainFake.client as never,
+    new Date('2026-11-05T12:34:56.789Z')
+  );
+  const onchainById = new Map(
+    onchainSnapshot.metrics.map((metric) => [metric.id, metric])
+  );
+  const onchainTvl = onchainById.get('tvl');
+  const onchainStablecoins = onchainById.get('stablecoins');
+  const onchainDex = onchainById.get('dex_volume');
+
+  check(
+    'onchain metrics use the fixed order and labels',
+    JSON.stringify(
+      onchainSnapshot.metrics.map((metric) => [metric.id, metric.label])
+    ) ===
+      JSON.stringify([
+        ['tvl', 'TVL'],
+        ['stablecoins', 'Stablecoins'],
+        ['dex_volume', 'DEX volume'],
+      ]) &&
+      onchainSnapshot.metrics.every((metric) => metric.usdUnit === 'USD')
+  );
+  check(
+    'onchain snapshot uses a 90-day window ending at asOf',
+    onchainSnapshot.asOf === '2026-11-04' &&
+      onchainSnapshot.windowDays === 90
+  );
+  check(
+    'onchain USD series are ascending and keep missing days unfilled',
+    JSON.stringify(onchainTvl?.usd) ===
+      JSON.stringify([
+        { date: '2026-08-07', value: 100 },
+        { date: '2026-08-09', value: 120 },
+        { date: '2026-11-04', value: 200 },
+      ]) &&
+      JSON.stringify(onchainStablecoins?.usd) ===
+        JSON.stringify([
+          { date: '2026-08-07', value: 1000 },
+          { date: '2026-09-01', value: 1100 },
+          { date: '2026-11-04', value: 1200 },
+        ]) &&
+      JSON.stringify(onchainDex?.usd) ===
+        JSON.stringify([
+          { date: '2026-08-07', value: 10 },
+          { date: '2026-08-10', value: 20 },
+          { date: '2026-11-02', value: 30 },
+        ])
+  );
+  check(
+    'onchain USD query covers the 90-day window',
+    onchainFake.metricCalls[0]?.where.sourceTs?.gte
+      ?.toISOString()
+      .slice(0, 10) === '2026-08-07' &&
+      onchainFake.metricCalls[0]?.where.sourceTs?.lt
+        ?.toISOString()
+        .slice(0, 10) === '2026-11-05'
+  );
+  check(
+    'onchain USD same-day duplicate uses the highest collectedAt',
+    onchainTvl?.usd.filter((point) => point.date === '2026-11-04').length ===
+      1 && onchainTvl.usd.at(-1)?.value === 200
+  );
+  check(
+    'onchain USD query filters defillama_history and ignores other providers',
+    onchainFake.metricCalls[0]?.where.source?.provider ===
+      'defillama_history' &&
+      !onchainTvl?.usd.some((point) => point.value === 999)
+  );
+  check(
+    'onchain series keep their own final dates without alignment',
+    onchainTvl?.usd.at(-1)?.date === '2026-11-04' &&
+      onchainStablecoins?.usd.at(-1)?.date === '2026-11-04' &&
+      onchainDex?.usd.at(-1)?.date === '2026-11-02'
+  );
+  check(
+    'onchain vsMean7d keeps the fraction value and unit',
+    onchainDex?.vsMean7dUnit === 'FRACTION' &&
+      onchainDex.vsMean7d[0]?.value === 0.123
+  );
+
+  const onchainKeys = collectKeys(onchainSnapshot);
+  const allowedOnchainKeys = new Set([
+    'generatedAt',
+    'asOf',
+    'windowDays',
+    'metrics',
+    'id',
+    'label',
+    'usdUnit',
+    'usd',
+    'vsMean7dUnit',
+    'vsMean7d',
+    'date',
+    'value',
+  ]);
+  check(
+    'onchain payload only contains keys from the declared types',
+    [...onchainKeys].every((key) => allowedOnchainKeys.has(key))
+  );
+  for (const forbidden of [
+    'status',
+    'collectedAt',
+    'evidence',
+    'ruleDescription',
+    'rawPayload',
+  ]) {
+    check(`onchain payload omits ${forbidden}`, !onchainKeys.has(forbidden));
+  }
+
+  const fullOnchainPoints = Array.from({ length: 90 }, (_, index) => ({
+    date: new Date(
+      new Date('2026-08-07T00:00:00.000Z').getTime() +
+        index * 24 * 60 * 60 * 1000
+    )
+      .toISOString()
+      .slice(0, 10),
+    value: index + 0.5,
+  }));
+  const fullOnchainSnapshot = buildOnchainPayload(
+    {
+      asOf: '2026-11-04',
+      metrics: (['tvl', 'stablecoins', 'dex_volume'] as const).map((id) => ({
+        id,
+        usd: fullOnchainPoints,
+        vsMean7d: fullOnchainPoints,
+        vsMean7dUnit: 'FRACTION',
+      })),
+    },
+    new Date('2026-11-05T12:34:56.789Z')
+  );
+  const fullOnchainBytes = Buffer.byteLength(
+    JSON.stringify(fullOnchainSnapshot),
+    'utf8'
+  );
+  check(
+    'onchain 90-day payload fits MAX_PAYLOAD_BYTES',
+    fullOnchainBytes <= MAX_PAYLOAD_BYTES,
+    `(${fullOnchainBytes} bytes)`
+  );
+
+  const onchainSource = readFileSync(
+    new URL('./onchain.ts', import.meta.url),
+    'utf8'
+  );
+  check(
+    'onchain builder has no database write calls',
+    !/\b(?:create|update|delete|upsert|executeRaw|queryRaw)\b/.test(
+      onchainSource
+    )
+  );
+
   const secretUrl =
     'postgresql://snapshot_writer:super-secret@db.example:5432/forum';
   const errorMessage = safeErrorMessage(
@@ -875,6 +1185,11 @@ async function main(): Promise<void> {
   check(
     'CLI parses the overview dry-run',
     parsed.screen === 'overview' && parsed.dryRun
+  );
+  const parsedOnchain = parseArgs(['--screen=onchain', '--dry-run']);
+  check(
+    'CLI parses the onchain dry-run',
+    parsedOnchain.screen === 'onchain' && parsedOnchain.dryRun
   );
   check(
     'CLI rejects an unknown screen',

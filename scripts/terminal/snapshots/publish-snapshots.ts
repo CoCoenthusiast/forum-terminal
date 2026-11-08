@@ -4,7 +4,8 @@ import {
   getDashboardDatabaseUrl,
   getDashboardPrisma,
 } from '../dashboard/db-readonly';
-import { buildOverviewSnapshot } from './overview';
+import { buildOnchainSnapshot, type OnchainSnapshot } from './onchain';
+import { buildOverviewSnapshot, type OverviewSnapshot } from './overview';
 import {
   assertPayloadSize,
   assertRemoteAllowed,
@@ -58,7 +59,7 @@ export async function run(
   env: NodeJS.ProcessEnv = process.env
 ): Promise<void> {
   const args = parseArgs(argv);
-  if (args.screen !== 'overview') {
+  if (args.screen !== 'overview' && args.screen !== 'onchain') {
     throw new Error(`Screen not implemented: ${args.screen}`);
   }
 
@@ -77,7 +78,14 @@ export async function run(
 
   const prisma = getDashboardPrisma();
   try {
-    const snapshot = await buildOverviewSnapshot(prisma, new Date());
+    let snapshot: OverviewSnapshot | OnchainSnapshot;
+    if (args.screen === 'overview') {
+      snapshot = await buildOverviewSnapshot(prisma, new Date());
+    } else if (args.screen === 'onchain') {
+      snapshot = await buildOnchainSnapshot(prisma, new Date());
+    } else {
+      throw new Error(`Screen not implemented: ${args.screen}`);
+    }
     assertPayloadSize(snapshot);
     const serialized = JSON.stringify(snapshot);
 
