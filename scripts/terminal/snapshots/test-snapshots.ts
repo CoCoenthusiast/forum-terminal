@@ -2,7 +2,7 @@
 import { buildOverviewPayload } from './overview';
 import { parseArgs } from './publish-snapshots';
 import { formatRecap, type RecapInput, type RecapMetric } from '../recap/recap-format';
-import { regimeFromStateRows } from '../recap/recap-reader';
+import { onchainLiquidityFromStateRows, regimeFromStateRows } from '../recap/recap-reader';
 import type {
   DailyMetricValue,
   HourlyMetricValue,
@@ -310,6 +310,7 @@ async function main(): Promise<void> {
           'marketActivity',
           'rollingActivity',
           'regime',
+          'onchainLiquidity',
           'sinceLastClose',
           'dataDates',
         ].sort()
@@ -523,6 +524,45 @@ async function main(): Promise<void> {
       })
   );
 
+  const onchainLiquidityInput: RecapInput = {
+    ...overviewInput(),
+    onchainLiquidity: {
+      classification: 'expanding',
+      legs: {
+        stablecoins: 'expanding',
+        tvl: 'neutral',
+        dex_volume: 'contracting',
+      },
+    },
+  };
+  const onchainLiquiditySnapshot = buildOverviewPayload(
+    onchainLiquidityInput,
+    readers.hourly,
+    readers.latestPrices,
+    readers.daily,
+    readers.rolling,
+    new Date('2026-11-05T12:34:56.789Z')
+  );
+  check(
+    'overview onchainLiquidity passes classification and legs through',
+    JSON.stringify(onchainLiquiditySnapshot.onchainLiquidity) ===
+      JSON.stringify(onchainLiquidityInput.onchainLiquidity)
+  );
+  check(
+    'overview onchainLiquidity is null when input is absent',
+    snapshot.onchainLiquidity === null
+  );
+  check(
+    'overview onchainLiquidity has no values, evidence or rule text fields',
+    !/"(?:value|status|stale|asOf|evidence|ruleDescription|rulesApplied|thresholdsUsed|STATE_RULE_DOC)"/.test(
+      JSON.stringify(onchainLiquiditySnapshot.onchainLiquidity)
+    )
+  );
+  check(
+    'formatRecap ignores onchainLiquidity',
+    formatRecap(onchainLiquidityInput) === formatRecap(overviewInput())
+  );
+
   const stateRegime = regimeFromStateRows([
     {
       computeMode: 'live',
@@ -617,6 +657,152 @@ async function main(): Promise<void> {
     'regimeFromStateRows returns null when a context key is missing',
     missingContextKeyRegime?.context === null &&
       missingContextKeyRegime.decidedBy?.sol_trend === 'range'
+  );
+
+  const stateLiquidity = onchainLiquidityFromStateRows([
+    {
+      computeMode: 'live',
+      payload: {
+        onchain_liquidity: {
+          classification: 'expanding',
+          evidence: [
+            {
+              indicator: 'stablecoin_supply_vs_mean_7d',
+              scope: 'solana',
+              role: 'decides',
+              legClassification: 'expanding',
+            },
+            {
+              indicator: 'tvl_vs_mean_7d',
+              scope: 'solana',
+              role: 'decides',
+              legClassification: 'neutral',
+            },
+            {
+              indicator: 'dex_volume_vs_mean_7d',
+              scope: 'solana',
+              role: 'decides',
+              legClassification: 'contracting',
+            },
+          ],
+        },
+      },
+    },
+  ]);
+  check(
+    'onchainLiquidityFromStateRows reads classification and all legs',
+    stateLiquidity?.classification === 'expanding' &&
+      stateLiquidity.legs.stablecoins === 'expanding' &&
+      stateLiquidity.legs.tvl === 'neutral' &&
+      stateLiquidity.legs.dex_volume === 'contracting'
+  );
+
+  const oldStateLiquidity = onchainLiquidityFromStateRows([
+    {
+      computeMode: 'live',
+      payload: {
+        regime: {
+          regimeId: 'range_neutral',
+        },
+      },
+    },
+  ]);
+  check(
+    'onchainLiquidityFromStateRows returns null for old payloads',
+    oldStateLiquidity === null
+  );
+
+  const invalidLegLiquidity = onchainLiquidityFromStateRows([
+    {
+      computeMode: 'live',
+      payload: {
+        onchain_liquidity: {
+          classification: 'neutral',
+          evidence: [
+            {
+              indicator: 'stablecoin_supply_vs_mean_7d',
+              scope: 'solana',
+              role: 'decides',
+              legClassification: 1,
+            },
+            {
+              indicator: 'tvl_vs_mean_7d',
+              scope: 'solana',
+              role: 'decides',
+              legClassification: 'expanding',
+            },
+          ],
+        },
+      },
+    },
+  ]);
+  check(
+    'onchainLiquidityFromStateRows nulls a non-string leg without dropping the others',
+    invalidLegLiquidity?.legs.stablecoins === null &&
+      invalidLegLiquidity.legs.tvl === 'expanding' &&
+      invalidLegLiquidity.legs.dex_volume === null
+  );
+
+  const ignoredRoleLiquidity = onchainLiquidityFromStateRows([
+    {
+      computeMode: 'live',
+      payload: {
+        onchain_liquidity: {
+          classification: 'expanding',
+          evidence: [
+            {
+              indicator: 'stablecoin_supply_vs_mean_7d',
+              scope: 'solana',
+              role: 'context',
+              legClassification: 'contracting',
+            },
+            {
+              indicator: 'tvl_vs_mean_7d',
+              scope: 'solana',
+              role: 'decides',
+              legClassification: 'expanding',
+            },
+            {
+              indicator: 'dex_volume_vs_mean_7d',
+              scope: 'ethereum',
+              role: 'decides',
+              legClassification: 'contracting',
+            },
+          ],
+        },
+      },
+    },
+  ]);
+  check(
+    'onchainLiquidityFromStateRows ignores evidence that is not decides on solana',
+    ignoredRoleLiquidity?.legs.stablecoins === null &&
+      ignoredRoleLiquidity.legs.tvl === 'expanding' &&
+      ignoredRoleLiquidity.legs.dex_volume === null
+  );
+
+  const orderedLiquidity = onchainLiquidityFromStateRows([
+    {
+      computeMode: 'backfill',
+      payload: {
+        onchain_liquidity: {
+          classification: 'contracting',
+          evidence: [],
+        },
+      },
+    },
+    {
+      computeMode: 'live',
+      payload: {
+        onchain_liquidity: {
+          classification: 'expanding',
+          evidence: [],
+        },
+      },
+    },
+  ]);
+  check(
+    'onchainLiquidityFromStateRows prefers live rows over backfill rows',
+    orderedLiquidity?.classification === 'expanding'
   );
 
   const secretUrl =

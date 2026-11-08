@@ -59,6 +59,15 @@ export interface RecapRegime {
   } | null;
 }
 
+export interface RecapOnchainLiquidity {
+  classification: string | null;
+  legs: {
+    stablecoins: string | null;
+    tvl: string | null;
+    dex_volume: string | null;
+  };
+}
+
 export interface RecapLaunchpad {
   slug: string;
   value: RecapMetric;
@@ -68,6 +77,7 @@ export interface RecapInput {
   asOf: string;
   prices: readonly RecapPrice[];
   regime: RecapRegime | null;
+  onchainLiquidity?: RecapOnchainLiquidity | null;
   leverage: {
     oiUsdChange7dPct: RecapMetric;
     funding7dMean: RecapMetric;

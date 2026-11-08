@@ -86,6 +86,15 @@ export interface OverviewSnapshotRegime {
   } | null;
 }
 
+export interface OverviewSnapshotOnchainLiquidity {
+  classification: string | null;
+  legs: {
+    stablecoins: string | null;
+    tvl: string | null;
+    dex_volume: string | null;
+  };
+}
+
 export interface OverviewSnapshotSinceLastClose {
   label: string;
   kind: 'price' | 'ratio';
@@ -108,6 +117,7 @@ export interface OverviewSnapshot {
   marketActivity: OverviewSnapshotMarketActivity[];
   rollingActivity: OverviewSnapshotRollingActivity[];
   regime: OverviewSnapshotRegime;
+  onchainLiquidity: OverviewSnapshotOnchainLiquidity | null;
   sinceLastClose: OverviewSnapshotSinceLastClose[];
   dataDates: OverviewSnapshotDataDate[];
 }
@@ -340,6 +350,7 @@ export function buildOverviewPayload(
     marketActivity,
     rollingActivity,
     regime: buildRegime(input),
+    onchainLiquidity: input.onchainLiquidity ?? null,
     sinceLastClose: buildSinceLastClose(input, latestPrices),
     dataDates: [
       { block: 'Leverage', date: isoTimestamp(leverageDate) },

@@ -6,6 +6,7 @@ import type {
   RecapInput,
   RecapLaunchpad,
   RecapMetric,
+  RecapOnchainLiquidity,
   RecapPrice,
   RecapRegime,
 } from './recap-format';
@@ -282,6 +283,64 @@ export function regimeFromStateRows(
   return null;
 }
 
+export function onchainLiquidityFromStateRows(
+  rows: readonly StateReadRow[]
+): RecapOnchainLiquidity | null {
+  if (rows.length === 0) return null;
+
+  const ordered = [...rows].sort((left, right) => {
+    if (left.computeMode === right.computeMode) return 0;
+    return left.computeMode === 'live' ? -1 : 1;
+  });
+
+  for (const row of ordered) {
+    const payload = asRecord(row.payload);
+    if (payload === null) continue;
+
+    const liquidity = asRecord(payload.onchain_liquidity);
+    if (liquidity === null) continue;
+
+    const classification =
+      typeof liquidity.classification === 'string'
+        ? liquidity.classification
+        : null;
+    const legs: RecapOnchainLiquidity['legs'] = {
+      stablecoins: null,
+      tvl: null,
+      dex_volume: null,
+    };
+
+    const evidence = Array.isArray(liquidity.evidence) ? liquidity.evidence : [];
+    for (const item of evidence) {
+      const evidenceRecord = asRecord(item);
+      if (
+        evidenceRecord === null ||
+        evidenceRecord.role !== 'decides' ||
+        evidenceRecord.scope !== 'solana'
+      ) {
+        continue;
+      }
+
+      const legClassification =
+        typeof evidenceRecord.legClassification === 'string'
+          ? evidenceRecord.legClassification
+          : null;
+
+      if (evidenceRecord.indicator === 'stablecoin_supply_vs_mean_7d') {
+        legs.stablecoins = legClassification;
+      } else if (evidenceRecord.indicator === 'tvl_vs_mean_7d') {
+        legs.tvl = legClassification;
+      } else if (evidenceRecord.indicator === 'dex_volume_vs_mean_7d') {
+        legs.dex_volume = legClassification;
+      }
+    }
+
+    return { classification, legs };
+  }
+
+  return null;
+}
+
 export function recapInputFromRows(
   asOf: string,
   stateRows: readonly StateReadRow[],
@@ -312,6 +371,7 @@ export function recapInputFromRows(
     asOf,
     prices,
     regime: regimeFromStateRows(stateRows),
+    onchainLiquidity: onchainLiquidityFromStateRows(stateRows),
     leverage: {
       oiUsdChange7dPct: metric('oiUsdChange7dPct'),
       funding7dMean: metric('funding7dMean'),
