@@ -18,6 +18,13 @@ interface PublishSnapshotLike {
   assets?: readonly PublishAssetLike[] | null;
   series?: readonly PublishSeriesLike[] | null;
   indicators?: readonly PublishSeriesLike[] | null;
+  platforms?:
+    | readonly {
+        volume?: PublishSeriesLike | null;
+        fees?: PublishSeriesLike | null;
+        indicators?: readonly PublishSeriesLike[] | null;
+      }[]
+    | null;
 }
 
 export function publishBlockReason(
@@ -78,6 +85,25 @@ export function publishBlockReason(
       )
     ) {
       return 'no macro series available';
+    }
+    return null;
+  }
+
+  if (screen === 'launchpads') {
+    const platforms = Array.isArray(snapshot.platforms)
+      ? snapshot.platforms
+      : [];
+    const entries = platforms.flatMap((platform) => [
+      platform?.volume,
+      platform?.fees,
+      ...(Array.isArray(platform?.indicators) ? platform.indicators : []),
+    ]);
+    if (
+      entries.every(
+        (entry) => !Array.isArray(entry?.points) || entry.points.length === 0
+      )
+    ) {
+      return 'no launchpads series available';
     }
     return null;
   }

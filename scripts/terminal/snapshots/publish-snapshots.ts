@@ -5,6 +5,7 @@ import {
   getDashboardPrisma,
 } from '../dashboard/db-readonly';
 import { publishBlockReason } from './guards';
+import { buildLaunchpadsSnapshot, type LaunchpadsSnapshot } from './launchpads';
 import { buildMacroSnapshot, type MacroSnapshot } from './macro';
 import {
   buildMarketStructureSnapshot,
@@ -69,7 +70,8 @@ export async function run(
     args.screen !== 'overview' &&
     args.screen !== 'onchain' &&
     args.screen !== 'market-structure' &&
-    args.screen !== 'macro'
+    args.screen !== 'macro' &&
+    args.screen !== 'launchpads'
   ) {
     throw new Error(`Screen not implemented: ${args.screen}`);
   }
@@ -93,7 +95,8 @@ export async function run(
       | OverviewSnapshot
       | OnchainSnapshot
       | MarketStructureSnapshot
-      | MacroSnapshot;
+      | MacroSnapshot
+      | LaunchpadsSnapshot;
     if (args.screen === 'overview') {
       snapshot = await buildOverviewSnapshot(prisma, new Date());
     } else if (args.screen === 'onchain') {
@@ -102,6 +105,8 @@ export async function run(
       snapshot = await buildMarketStructureSnapshot(prisma, new Date());
     } else if (args.screen === 'macro') {
       snapshot = await buildMacroSnapshot(prisma, new Date());
+    } else if (args.screen === 'launchpads') {
+      snapshot = await buildLaunchpadsSnapshot(prisma, new Date());
     } else {
       throw new Error(`Screen not implemented: ${args.screen}`);
     }
