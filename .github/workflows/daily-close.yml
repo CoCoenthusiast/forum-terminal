@@ -93,6 +93,14 @@ jobs:
           DASHBOARD_DATABASE_URL: ${{ secrets.DASHBOARD_DATABASE_URL }}
           FORUM_SNAPSHOT_DATABASE_URL: ${{ secrets.FORUM_SNAPSHOT_DATABASE_URL }}
           TERMINAL_ALLOW_REMOTE: "1"
+      - name: Publish market-structure snapshot
+        run: npm run publish:snapshots -- --screen market-structure
+        timeout-minutes: 2
+        if: ${{ !cancelled() }}
+        env:
+          DASHBOARD_DATABASE_URL: ${{ secrets.DASHBOARD_DATABASE_URL }}
+          FORUM_SNAPSHOT_DATABASE_URL: ${{ secrets.FORUM_SNAPSHOT_DATABASE_URL }}
+          TERMINAL_ALLOW_REMOTE: "1"
       - name: Check data freshness
         run: npm run check:freshness
         env:
