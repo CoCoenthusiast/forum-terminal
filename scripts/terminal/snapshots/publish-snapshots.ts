@@ -5,6 +5,10 @@ import {
   getDashboardPrisma,
 } from '../dashboard/db-readonly';
 import { publishBlockReason } from './guards';
+import {
+  buildMarketStructureSnapshot,
+  type MarketStructureSnapshot,
+} from './market-structure';
 import { buildOnchainSnapshot, type OnchainSnapshot } from './onchain';
 import { buildOverviewSnapshot, type OverviewSnapshot } from './overview';
 import {
@@ -60,7 +64,11 @@ export async function run(
   env: NodeJS.ProcessEnv = process.env
 ): Promise<void> {
   const args = parseArgs(argv);
-  if (args.screen !== 'overview' && args.screen !== 'onchain') {
+  if (
+    args.screen !== 'overview' &&
+    args.screen !== 'onchain' &&
+    args.screen !== 'market-structure'
+  ) {
     throw new Error(`Screen not implemented: ${args.screen}`);
   }
 
@@ -79,11 +87,16 @@ export async function run(
 
   const prisma = getDashboardPrisma();
   try {
-    let snapshot: OverviewSnapshot | OnchainSnapshot;
+    let snapshot:
+      | OverviewSnapshot
+      | OnchainSnapshot
+      | MarketStructureSnapshot;
     if (args.screen === 'overview') {
       snapshot = await buildOverviewSnapshot(prisma, new Date());
     } else if (args.screen === 'onchain') {
       snapshot = await buildOnchainSnapshot(prisma, new Date());
+    } else if (args.screen === 'market-structure') {
+      snapshot = await buildMarketStructureSnapshot(prisma, new Date());
     } else {
       throw new Error(`Screen not implemented: ${args.screen}`);
     }

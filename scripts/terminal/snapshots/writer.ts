@@ -8,6 +8,7 @@ export const SNAPSHOT_KEYS = [
   'leverage-macro',
   'launchpads',
   'tokens',
+  'market-structure',
 ] as const;
 
 export type SnapshotKey = (typeof SNAPSHOT_KEYS)[number];

@@ -2,11 +2,16 @@ interface PublishPriceLike {
   closed?: { value?: unknown } | null;
 }
 
+interface PublishAssetLike {
+  price?: readonly unknown[] | null;
+}
+
 interface PublishSnapshotLike {
   asOf?: unknown;
   regime?: { id?: unknown } | null;
   prices?: readonly PublishPriceLike[] | null;
   metrics?: readonly { usd?: readonly unknown[] | null }[] | null;
+  assets?: readonly PublishAssetLike[] | null;
 }
 
 export function publishBlockReason(
@@ -40,6 +45,18 @@ export function publishBlockReason(
       )
     ) {
       return 'no onchain series available';
+    }
+    return null;
+  }
+
+  if (screen === 'market-structure') {
+    const assets = Array.isArray(snapshot.assets) ? snapshot.assets : [];
+    if (
+      assets.every(
+        (asset) => !Array.isArray(asset?.price) || asset.price.length === 0
+      )
+    ) {
+      return 'no market structure prices available';
     }
     return null;
   }

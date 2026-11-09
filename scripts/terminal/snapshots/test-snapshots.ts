@@ -2,10 +2,16 @@
 import { readFileSync } from 'node:fs';
 import { publishBlockReason } from './guards';
 import {
+  buildMarketStructurePayload,
+  buildMarketStructureSnapshot,
+} from './market-structure';
+import {
   buildOnchainPayload,
   buildOnchainSnapshot,
 } from './onchain';
 import { buildOverviewPayload } from './overview';
+import { COINALYZE_LEVERAGE_FORMULA_VERSION } from '../indicators/coinalyze-leverage-catalog';
+import { INDICATOR_FORMULA_VERSION } from '../state/compute-state';
 import { parseArgs } from './publish-snapshots';
 import { formatRecap, type RecapInput, type RecapMetric } from '../recap/recap-format';
 import { onchainLiquidityFromStateRows, regimeFromStateRows } from '../recap/recap-reader';
@@ -199,6 +205,196 @@ interface FakeMetricFindManyArgs {
   };
 }
 
+interface FakeMarketSnapshotRow {
+  asset: string;
+  priceUsd: unknown;
+  volume24hUsd: unknown;
+  collectedAt: Date;
+  sourceTs: Date;
+  source: { provider: string };
+}
+
+interface FakeMarketFindManyArgs {
+  where: {
+    asset?: { in?: readonly string[] };
+    source?: { provider?: string };
+    sourceTs?: { gte?: Date; lt?: Date; lte?: Date };
+  };
+}
+
+interface FakeIndicatorFindManyArgs {
+  where: {
+    asOf?: { gte?: Date; lte?: Date };
+    OR?: readonly {
+      indicator: string;
+      scope: string;
+      formulaVersion: string;
+    }[];
+  };
+}
+
+function fakeMarketStructureClient(
+  marketRows: readonly FakeMarketSnapshotRow[],
+  indicatorRows: readonly FakeIndicatorSnapshotRow[]
+): {
+  client: unknown;
+  marketCalls: FakeMarketFindManyArgs[];
+  indicatorCalls: FakeIndicatorFindManyArgs[];
+} {
+  const marketCalls: FakeMarketFindManyArgs[] = [];
+  const indicatorCalls: FakeIndicatorFindManyArgs[] = [];
+  const client = {
+    marketSnapshot: {
+      findMany: async (args: FakeMarketFindManyArgs) => {
+        marketCalls.push(args);
+        return marketRows.filter((row) => {
+          const where = args.where;
+          if (
+            where.asset?.in !== undefined &&
+            !where.asset.in.includes(row.asset)
+          ) {
+            return false;
+          }
+          if (
+            where.source?.provider !== undefined &&
+            row.source.provider !== where.source.provider
+          ) {
+            return false;
+          }
+          const sourceTs = row.sourceTs.getTime();
+          if (
+            where.sourceTs?.gte !== undefined &&
+            sourceTs < where.sourceTs.gte.getTime()
+          ) {
+            return false;
+          }
+          if (
+            where.sourceTs?.lt !== undefined &&
+            sourceTs >= where.sourceTs.lt.getTime()
+          ) {
+            return false;
+          }
+          if (
+            where.sourceTs?.lte !== undefined &&
+            sourceTs > where.sourceTs.lte.getTime()
+          ) {
+            return false;
+          }
+          return true;
+        });
+      },
+    },
+    indicatorSnapshot: {
+      findMany: async (args: FakeIndicatorFindManyArgs) => {
+        indicatorCalls.push(args);
+        return indicatorRows.filter((row) => {
+          const where = args.where;
+          const asOf = row.asOf.getTime();
+          if (
+            where.asOf?.gte !== undefined &&
+            asOf < where.asOf.gte.getTime()
+          ) {
+            return false;
+          }
+          if (
+            where.asOf?.lte !== undefined &&
+            asOf > where.asOf.lte.getTime()
+          ) {
+            return false;
+          }
+          if (where.OR !== undefined) {
+            return where.OR.some(
+              (target) =>
+                target.indicator === row.indicator &&
+                target.scope === row.scope &&
+                target.formulaVersion === row.formulaVersion
+            );
+          }
+          return true;
+        });
+      },
+    },
+  };
+  return { client, marketCalls, indicatorCalls };
+}
+
+function marketStructureFixtureRows(): {
+  marketRows: FakeMarketSnapshotRow[];
+  indicatorRows: FakeIndicatorSnapshotRow[];
+} {
+  const at = (date: string): Date => new Date(`${date}T00:00:00.000Z`);
+  const market = (
+    asset: string,
+    date: string,
+    priceUsd: unknown,
+    volume24hUsd: unknown,
+    collectedAt: string,
+    provider = 'coingecko_history'
+  ): FakeMarketSnapshotRow => ({
+    asset,
+    priceUsd,
+    volume24hUsd,
+    collectedAt: at(collectedAt),
+    sourceTs: at(date),
+    source: { provider },
+  });
+  const leverage = (
+    indicator: string,
+    scope: string,
+    date: string,
+    value: number,
+    unit: string
+  ): FakeIndicatorSnapshotRow => ({
+    indicator,
+    scope,
+    formulaVersion: COINALYZE_LEVERAGE_FORMULA_VERSION,
+    status: 'ok',
+    value,
+    unit,
+    asOf: at(date),
+  });
+  const ratio = (
+    scope: string,
+    date: string,
+    value: number
+  ): FakeIndicatorSnapshotRow => ({
+    indicator: 'relative_strength_7d',
+    scope,
+    formulaVersion: INDICATOR_FORMULA_VERSION,
+    status: 'ok',
+    value,
+    unit: 'FRACTION',
+    asOf: at(date),
+  });
+
+  return {
+    marketRows: [
+      market('solana', '2026-08-07', 1, 1, '2026-08-08'),
+      market('solana', '2026-08-08', 100, 1000, '2026-08-09'),
+      market('solana', '2026-08-09', 999, 999, '2026-08-10', 'coingecko'),
+      market('solana', '2026-08-10', 120, 1200, '2026-08-11'),
+      market('solana', '2026-11-03', 50, null, '2026-11-04'),
+      market('solana', '2026-11-04', null, 130, '2026-11-05'),
+      market('solana', '2026-11-05', 190, null, '2026-11-05'),
+      market('solana', '2026-11-05', 200, null, '2026-11-06'),
+      market('solana', '2026-11-06', 300, 3000, '2026-11-07'),
+      market('bitcoin', '2026-11-05', 50000, 500, '2026-11-06'),
+      market('ethereum', '2026-11-05', 3000, 300, '2026-11-06'),
+    ],
+    indicatorRows: [
+      leverage('oi_usd_change_1d_pct', 'coinalyze:SOL', '2026-11-01', 1, 'PERCENT'),
+      leverage('oi_usd_change_7d_pct', 'coinalyze:SOL', '2026-11-01', 2, 'PERCENT'),
+      leverage('funding_7d_mean', 'coinalyze:SOL', '2026-11-01', 3, 'PERCENT'),
+      leverage('long_short_ratio_7d_mean', 'coinalyze:SOL', '2026-11-01', 1.5, 'RATIO'),
+      leverage('liq_total_vs_mean7d_pct', 'coinalyze:SOL', '2026-11-01', 4, 'PERCENT'),
+      leverage('liq_long_share_pct', 'coinalyze:SOL', '2026-11-01', 55, 'PERCENT'),
+      leverage('oi_usd_change_1d_pct', 'coinalyze:BTC', '2026-11-01', 10, 'PERCENT'),
+      ratio('solana:bitcoin', '2026-11-02', 0.03),
+      ratio('solana:ethereum', '2026-11-02', 0.02),
+    ],
+  };
+}
+
 function fakeOnchainClient(
   metricRows: readonly FakeMetricSnapshotRow[],
   indicatorRows: readonly FakeIndicatorSnapshotRow[]
@@ -338,6 +534,7 @@ async function main(): Promise<void> {
     'leverage-macro',
     'launchpads',
     'tokens',
+    'market-structure',
   ];
   check(
     'snapshot key whitelist is exact',
@@ -1116,6 +1313,352 @@ async function main(): Promise<void> {
     )
   );
 
+  const marketFixture = marketStructureFixtureRows();
+  const marketFake = fakeMarketStructureClient(
+    marketFixture.marketRows,
+    marketFixture.indicatorRows
+  );
+  const marketSnapshot = await buildMarketStructureSnapshot(
+    marketFake.client as never,
+    new Date('2026-11-05T12:34:56.789Z')
+  );
+  const marketSolana = marketSnapshot.assets.find(
+    (asset) => asset.id === 'solana'
+  );
+  const marketSolanaOi = marketSolana?.leverage.find(
+    (series) => series.id === 'oi_change_1d'
+  );
+  const marketSolBtc = marketSnapshot.relativeStrength.find(
+    (ratio) => ratio.id === 'sol_btc'
+  );
+
+  check(
+    'market-structure uses a 90-day window ending at asOf',
+    marketSnapshot.asOf === '2026-11-04' &&
+      marketSnapshot.windowDays === 90
+  );
+  check(
+    'market-structure assets use the fixed order and labels',
+    JSON.stringify(
+      marketSnapshot.assets.map((asset) => [asset.id, asset.label])
+    ) ===
+      JSON.stringify([
+        ['solana', 'SOL'],
+        ['bitcoin', 'BTC'],
+        ['ethereum', 'ETH'],
+      ])
+  );
+  check(
+    'market-structure price is ascending and keeps missing days unfilled',
+    JSON.stringify(marketSolana?.price) ===
+      JSON.stringify([
+        { date: '2026-08-07', value: 100 },
+        { date: '2026-08-09', value: 120 },
+        { date: '2026-11-02', value: 50 },
+        { date: '2026-11-04', value: 200 },
+      ])
+  );
+  check(
+    'market-structure spot volume is ascending and keeps missing days unfilled',
+    JSON.stringify(marketSolana?.spotVolume) ===
+      JSON.stringify([
+        { date: '2026-08-07', value: 1000 },
+        { date: '2026-08-09', value: 1200 },
+        { date: '2026-11-03', value: 130 },
+      ])
+  );
+  check(
+    'market-structure price query covers the 90-day window',
+    marketFake.marketCalls[0]?.where.sourceTs?.gte
+      ?.toISOString()
+      .slice(0, 10) === '2026-08-08' &&
+      marketFake.marketCalls[0]?.where.sourceTs?.lte
+        ?.toISOString()
+        .slice(0, 10) === '2026-11-05'
+  );
+  const firstWindowDate = new Date(
+    new Date('2026-11-04T00:00:00.000Z').getTime() - 89 * 24 * 60 * 60 * 1000
+  )
+    .toISOString()
+    .slice(0, 10);
+  check(
+    'market-structure first point is asOf minus 89 days',
+    marketSolana?.price[0]?.date === firstWindowDate
+  );
+
+  const conventionMarket = (
+    date: string,
+    priceUsd: unknown,
+    volume24hUsd: unknown,
+    collectedAt: string
+  ): FakeMarketSnapshotRow => ({
+    asset: 'solana',
+    priceUsd,
+    volume24hUsd,
+    collectedAt: new Date(`${collectedAt}T00:00:00.000Z`),
+    sourceTs: new Date(`${date}T00:00:00.000Z`),
+    source: { provider: 'coingecko_history' },
+  });
+  const conventionFake = fakeMarketStructureClient(
+    [
+      conventionMarket('2026-11-09', 123, 456, '2026-11-09'),
+      conventionMarket('2026-11-10', 999, 999, '2026-11-10'),
+    ],
+    []
+  );
+  const conventionSnapshot = await buildMarketStructureSnapshot(
+    conventionFake.client as never,
+    new Date('2026-11-09T12:00:00.000Z')
+  );
+  const conventionSolana = conventionSnapshot.assets.find(
+    (asset) => asset.id === 'solana'
+  );
+  check(
+    'market-structure sourceTs 2026-11-09T00:00Z with asOf 2026-11-08 maps to 2026-11-08',
+    JSON.stringify(conventionSolana?.price) ===
+      JSON.stringify([{ date: '2026-11-08', value: 123 }]) &&
+      JSON.stringify(conventionSolana?.spotVolume) ===
+        JSON.stringify([{ date: '2026-11-08', value: 456 }])
+  );
+  check(
+    'market-structure sourceTs 2026-11-10T00:00Z with asOf 2026-11-08 does not enter',
+    !conventionSolana?.price.some((point) => point.value === 999) &&
+      !conventionSolana?.spotVolume.some((point) => point.value === 999) &&
+      !conventionSolana?.price.some((point) => point.date === '2026-11-09')
+  );
+
+  const dailyCloseFake = fakeMarketStructureClient(
+    [
+      conventionMarket('2026-11-06', 89.2316664765679, null, '2026-11-06'),
+      conventionMarket('2026-11-07', 90.06013199290226, null, '2026-11-07'),
+      conventionMarket('2026-11-08', 89.70181157825633, null, '2026-11-08'),
+      conventionMarket('2026-11-09', 86.41327548972107, null, '2026-11-09'),
+    ],
+    []
+  );
+  const dailyCloseSnapshot = await buildMarketStructureSnapshot(
+    dailyCloseFake.client as never,
+    new Date('2026-11-09T12:00:00.000Z')
+  );
+  const dailyCloseSolana = dailyCloseSnapshot.assets.find(
+    (asset) => asset.id === 'solana'
+  );
+  check(
+    'price series uses the DailyClose date convention',
+    JSON.stringify(dailyCloseSolana?.price) ===
+      JSON.stringify([
+        { date: '2026-11-05', value: 89.2316664765679 },
+        { date: '2026-11-06', value: 90.06013199290226 },
+        { date: '2026-11-07', value: 89.70181157825633 },
+        { date: '2026-11-08', value: 86.41327548972107 },
+      ])
+  );
+
+  check(
+    'market-structure same-day duplicate uses the highest collectedAt',
+    marketSolana?.price.filter((point) => point.date === '2026-11-04')
+      .length === 1 &&
+      marketSolana.price.find((point) => point.date === '2026-11-04')
+        ?.value === 200
+  );
+  check(
+    'market-structure price query filters coingecko_history',
+    marketFake.marketCalls[0]?.where.source?.provider === 'coingecko_history'
+  );
+  check(
+    'market-structure never uses coingecko provider rows',
+    !marketSolana?.price.some((point) => point.value === 999) &&
+      !marketSolana?.spotVolume.some((point) => point.value === 999)
+  );
+  check(
+    'market-structure excludes the partial current day',
+    !marketSolana?.price.some((point) => point.date === '2026-11-05') &&
+      !marketSolana?.spotVolume.some((point) => point.date === '2026-11-05')
+  );
+  check(
+    'market-structure null price skips only the price day',
+    !marketSolana?.price.some((point) => point.date === '2026-11-03') &&
+      Boolean(
+        marketSolana?.spotVolume.some(
+          (point) => point.date === '2026-11-03' && point.value === 130
+        )
+      )
+  );
+  check(
+    'market-structure null volume skips only the volume day',
+    Boolean(
+      marketSolana?.price.some(
+        (point) => point.date === '2026-11-02' && point.value === 50
+      )
+    ) &&
+      !marketSolana?.spotVolume.some(
+        (point) => point.date === '2026-11-02'
+      )
+  );
+  check(
+    'market-structure series keep their own final dates',
+    marketSolana?.price.at(-1)?.date === '2026-11-04' &&
+      marketSolana?.spotVolume.at(-1)?.date === '2026-11-03' &&
+      marketSolanaOi?.points.at(-1)?.date === '2026-11-01' &&
+      marketSolBtc?.points.at(-1)?.date === '2026-11-02'
+  );
+  check(
+    'market-structure leverage ids and labels are fixed',
+    JSON.stringify(
+      marketSolana?.leverage.map((series) => [series.id, series.label])
+    ) ===
+      JSON.stringify([
+        ['oi_change_1d', 'OI change 1d'],
+        ['oi_change_7d', 'OI change 7d'],
+        ['funding_7d_mean', 'Funding 7d mean'],
+        ['long_short_ratio_7d_mean', 'Long/short ratio 7d mean'],
+        ['liq_total_vs_mean_7d', 'Total liquidations vs 7d mean'],
+        ['liq_long_share', 'Long share of liquidations'],
+      ])
+  );
+  check(
+    'market-structure leverage maps indicators to the right ids',
+    marketSolana?.leverage.map((series) => series.points[0]?.value).join(',') ===
+      '1,2,3,1.5,4,55'
+  );
+  check(
+    'market-structure leverage units pass through as returned',
+    marketSolana?.leverage.find(
+      (series) => series.id === 'long_short_ratio_7d_mean'
+    )?.unit === 'RATIO' &&
+      marketSolana?.leverage
+        .filter((series) => series.id !== 'long_short_ratio_7d_mean')
+        .every((series) => series.unit === 'PERCENT')
+  );
+  check(
+    'market-structure relative strength uses solana:bitcoin and solana:ethereum',
+    JSON.stringify(
+      marketFake.indicatorCalls[0]?.where.OR?.filter(
+        (target) => target.indicator === 'relative_strength_7d'
+      )
+        .map((target) => target.scope)
+        .sort()
+    ) === JSON.stringify(['solana:bitcoin', 'solana:ethereum'])
+  );
+  check(
+    'market-structure relative strength keeps ids, labels, units and points',
+    JSON.stringify(
+      marketSnapshot.relativeStrength.map((ratio) => [
+        ratio.id,
+        ratio.label,
+        ratio.unit,
+        ratio.points,
+      ])
+    ) ===
+      JSON.stringify([
+        [
+          'sol_btc',
+          'SOL/BTC',
+          'FRACTION',
+          [{ date: '2026-11-02', value: 0.03 }],
+        ],
+        [
+          'sol_eth',
+          'SOL/ETH',
+          'FRACTION',
+          [{ date: '2026-11-02', value: 0.02 }],
+        ],
+      ])
+  );
+
+  const marketStructureKeys = collectKeys(marketSnapshot);
+  const allowedMarketKeys = new Set([
+    'generatedAt',
+    'asOf',
+    'windowDays',
+    'assets',
+    'relativeStrength',
+    'id',
+    'label',
+    'price',
+    'spotVolume',
+    'leverage',
+    'unit',
+    'points',
+    'date',
+    'value',
+  ]);
+  check(
+    'market-structure payload only contains keys from the declared types',
+    [...marketStructureKeys].every((key) => allowedMarketKeys.has(key))
+  );
+  for (const forbidden of [
+    'status',
+    'collectedAt',
+    'evidence',
+    'ruleDescription',
+    'rawPayload',
+  ]) {
+    check(
+      `market-structure payload omits ${forbidden}`,
+      !marketStructureKeys.has(forbidden)
+    );
+  }
+
+  const fullMarketPoints = Array.from({ length: 90 }, (_, index) => ({
+    date: new Date(
+      new Date('2026-08-07T00:00:00.000Z').getTime() +
+        index * 24 * 60 * 60 * 1000
+    )
+      .toISOString()
+      .slice(0, 10),
+    value: index + 0.5,
+  }));
+  const fullMarketLeverageIds = [
+    'oi_change_1d',
+    'oi_change_7d',
+    'funding_7d_mean',
+    'long_short_ratio_7d_mean',
+    'liq_total_vs_mean_7d',
+    'liq_long_share',
+  ] as const;
+  const fullMarketSnapshot = buildMarketStructurePayload(
+    {
+      asOf: '2026-11-04',
+      assets: (['solana', 'bitcoin', 'ethereum'] as const).map((id) => ({
+        id,
+        price: fullMarketPoints,
+        spotVolume: fullMarketPoints,
+        leverage: fullMarketLeverageIds.map((leverageId) => ({
+          id: leverageId,
+          unit: 'PERCENT',
+          points: fullMarketPoints,
+        })),
+      })),
+      relativeStrength: (['sol_btc', 'sol_eth'] as const).map((id) => ({
+        id,
+        unit: 'FRACTION',
+        points: fullMarketPoints,
+      })),
+    },
+    new Date('2026-11-05T12:34:56.789Z')
+  );
+  const fullMarketBytes = Buffer.byteLength(
+    JSON.stringify(fullMarketSnapshot),
+    'utf8'
+  );
+  check(
+    'market-structure 90-day payload fits MAX_PAYLOAD_BYTES',
+    fullMarketBytes <= MAX_PAYLOAD_BYTES,
+    `(${fullMarketBytes} bytes)`
+  );
+
+  const marketStructureSource = readFileSync(
+    new URL('./market-structure.ts', import.meta.url),
+    'utf8'
+  );
+  check(
+    'market-structure builder has no database write calls',
+    !/\b(?:create|update|delete|upsert|executeRaw|queryRaw)\b/.test(
+      marketStructureSource
+    )
+  );
+
   const blockedRegimeSnapshot = {
     ...snapshot,
     regime: { ...snapshot.regime, id: null },
@@ -1167,6 +1710,43 @@ async function main(): Promise<void> {
   check(
     'onchain guard allows a snapshot with only one empty usd series',
     publishBlockReason('onchain', partiallyEmptyOnchainSnapshot) === null
+  );
+
+  const emptyMarketSnapshot = {
+    ...marketSnapshot,
+    assets: marketSnapshot.assets.map((asset) => ({ ...asset, price: [] })),
+  };
+  check(
+    'market-structure guard blocks when every price series is empty',
+    publishBlockReason('market-structure', emptyMarketSnapshot) ===
+      'no market structure prices available'
+  );
+  const missingMarketPricesSnapshot = {
+    ...marketSnapshot,
+    assets: marketSnapshot.assets.map((asset) => ({
+      id: asset.id,
+      label: asset.label,
+      spotVolume: asset.spotVolume,
+      leverage: asset.leverage,
+    })),
+  };
+  check(
+    'market-structure guard blocks when price is absent',
+    publishBlockReason(
+      'market-structure',
+      missingMarketPricesSnapshot as never
+    ) === 'no market structure prices available'
+  );
+  const partiallyEmptyMarketSnapshot = {
+    ...marketSnapshot,
+    assets: marketSnapshot.assets.map((asset, index) =>
+      index === 0 ? { ...asset, price: [] } : asset
+    ),
+  };
+  check(
+    'market-structure guard allows a snapshot with at least one price series',
+    publishBlockReason('market-structure', partiallyEmptyMarketSnapshot) ===
+      null
   );
 
   const guardsSource = readFileSync(
@@ -1255,6 +1835,15 @@ async function main(): Promise<void> {
   check(
     'CLI parses the onchain dry-run',
     parsedOnchain.screen === 'onchain' && parsedOnchain.dryRun
+  );
+  check(
+    'market-structure is an allowed snapshot key',
+    isSnapshotKey('market-structure')
+  );
+  const parsedMarket = parseArgs(['--screen=market-structure', '--dry-run']);
+  check(
+    'CLI parses the market-structure dry-run',
+    parsedMarket.screen === 'market-structure' && parsedMarket.dryRun
   );
   check(
     'CLI rejects an unknown screen',
