@@ -9,6 +9,7 @@ export const SNAPSHOT_KEYS = [
   'launchpads',
   'tokens',
   'market-structure',
+  'macro',
 ] as const;
 
 export type SnapshotKey = (typeof SNAPSHOT_KEYS)[number];

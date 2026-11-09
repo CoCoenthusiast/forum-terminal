@@ -535,6 +535,7 @@ async function main(): Promise<void> {
     'launchpads',
     'tokens',
     'market-structure',
+    'macro',
   ];
   check(
     'snapshot key whitelist is exact',

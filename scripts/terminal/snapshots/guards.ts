@@ -6,12 +6,18 @@ interface PublishAssetLike {
   price?: readonly unknown[] | null;
 }
 
+interface PublishSeriesLike {
+  points?: readonly unknown[] | null;
+}
+
 interface PublishSnapshotLike {
   asOf?: unknown;
   regime?: { id?: unknown } | null;
   prices?: readonly PublishPriceLike[] | null;
   metrics?: readonly { usd?: readonly unknown[] | null }[] | null;
   assets?: readonly PublishAssetLike[] | null;
+  series?: readonly PublishSeriesLike[] | null;
+  indicators?: readonly PublishSeriesLike[] | null;
 }
 
 export function publishBlockReason(
@@ -57,6 +63,21 @@ export function publishBlockReason(
       )
     ) {
       return 'no market structure prices available';
+    }
+    return null;
+  }
+
+  if (screen === 'macro') {
+    const entries = [
+      ...(Array.isArray(snapshot.series) ? snapshot.series : []),
+      ...(Array.isArray(snapshot.indicators) ? snapshot.indicators : []),
+    ];
+    if (
+      entries.every(
+        (entry) => !Array.isArray(entry?.points) || entry.points.length === 0
+      )
+    ) {
+      return 'no macro series available';
     }
     return null;
   }
