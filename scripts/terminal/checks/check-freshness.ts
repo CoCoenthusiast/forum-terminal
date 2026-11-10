@@ -54,7 +54,7 @@ async function latestToDate(
   return row?.toDate ?? null;
 }
 
-async function readFreshnessInput(
+export async function readFreshnessInput(
   client: Pick<
     PrismaClient,
     | 'marketSnapshot'

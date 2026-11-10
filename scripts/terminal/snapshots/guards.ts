@@ -25,6 +25,7 @@ interface PublishSnapshotLike {
         indicators?: readonly PublishSeriesLike[] | null;
       }[]
     | null;
+  items?: readonly { lastDate?: unknown }[] | null;
 }
 
 export function publishBlockReason(
@@ -85,6 +86,14 @@ export function publishBlockReason(
       )
     ) {
       return 'no macro series available';
+    }
+    return null;
+  }
+
+  if (screen === 'health') {
+    const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+    if (items.every((item) => item?.lastDate == null)) {
+      return 'no health data available';
     }
     return null;
   }
